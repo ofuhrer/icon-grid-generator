@@ -11,4 +11,5 @@ nav:
   - Home: index.md
   - Examples: examples.md
   - API: api.md
+  - Design: design.md
   - Repository Metadata: repository-metadata.md

@@ -105,6 +105,7 @@ The minimal documentation lives in [docs](docs):
 - [Overview](docs/index.md)
 - [Examples](docs/examples.md)
 - [API overview](docs/api.md)
+- [Design notes](docs/design.md)
 - [Repository metadata](docs/repository-metadata.md)
 
 To preview the docs locally:
