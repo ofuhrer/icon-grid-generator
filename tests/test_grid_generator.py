@@ -9,8 +9,8 @@ import grid_generator as grid_generator_package
 from grid_generator import (
     IconGrid,
     IconGridOptions,
-    IconGridSpec,
-    LimitedAreaSpec,
+    GlobalGridSpec,
+    LimitedAreaGridSpec,
     TorusGridSpec,
     generate_grid,
 )
@@ -27,8 +27,8 @@ def test_public_package_exports_only_supported_grid_api():
     assert grid_generator_package.__all__ == [
         "IconGrid",
         "IconGridOptions",
-        "IconGridSpec",
-        "LimitedAreaSpec",
+        "GlobalGridSpec",
+        "LimitedAreaGridSpec",
         "TorusGridSpec",
         "generate_grid",
     ]
@@ -37,10 +37,12 @@ def test_public_package_exports_only_supported_grid_api():
     assert not hasattr(grid_generator_package, "GeneratedGrid")
     assert not hasattr(grid_generator_package, "GridOptions")
     assert not hasattr(grid_generator_package, "GridSpec")
+    assert not hasattr(grid_generator_package, "IconGridSpec")
+    assert not hasattr(grid_generator_package, "LimitedAreaSpec")
     assert grid_generator_package.IconGrid is IconGrid
     assert grid_generator_package.IconGridOptions is IconGridOptions
-    assert grid_generator_package.IconGridSpec is IconGridSpec
-    assert grid_generator_package.LimitedAreaSpec is LimitedAreaSpec
+    assert grid_generator_package.GlobalGridSpec is GlobalGridSpec
+    assert grid_generator_package.LimitedAreaGridSpec is LimitedAreaGridSpec
     assert grid_generator_package.TorusGridSpec is TorusGridSpec
     assert grid_generator_package.generate_grid is generate_grid
 
@@ -112,12 +114,26 @@ def test_parse_grid_spec_normalizes_supported_names_and_expected_counts():
 
     spec = parse_grid_spec("R02B03")
 
+    assert isinstance(spec, GlobalGridSpec)
     assert spec.root == 2
     assert spec.bisections == 3
     assert spec.frequency == 16
     assert spec.expected_cells == 5120
     assert spec.expected_edges == 7680
     assert spec.expected_vertices == 2562
+
+
+def test_global_grid_spec_derives_frequency_and_name():
+    spec = GlobalGridSpec(root=2, bisections=3)
+
+    assert spec.frequency == 16
+    assert spec.name == "R02B03"
+    assert generate_grid(spec).dims["cell"] == 5120
+
+
+def test_global_grid_spec_rejects_inconsistent_frequency():
+    with pytest.raises(ValueError, match=r"frequency must equal root \* 2\*\*bisections"):
+        GlobalGridSpec(root=2, bisections=3, frequency=15)
 
 
 @pytest.mark.parametrize(
@@ -143,6 +159,26 @@ def test_parse_grid_spec_negative_bisection_defensive_guard(monkeypatch):
 
     with pytest.raises(ValueError, match="bisections must be non-negative"):
         parse_grid_spec("R01B-1")
+
+
+def test_generate_grid_accepts_all_public_grid_specs():
+    global_grid = generate_grid(parse_grid_spec("R01B00"))
+    torus_grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=1.0))
+    limited_area_grid = generate_grid(
+        LimitedAreaGridSpec(
+            "R02B01",
+            lon_min=-30.0,
+            lon_max=30.0,
+            lat_min=-30.0,
+            lat_max=30.0,
+            boundary_depth=1,
+        ),
+        options={"max_cells": None},
+    )
+
+    assert global_grid.metadata["grid_geometry"] == 1
+    assert torus_grid.metadata["grid_geometry"] == 2
+    assert limited_area_grid.metadata["grid_geometry"] == 3
 
 
 @pytest.mark.parametrize(
@@ -368,7 +404,7 @@ def test_torus_netcdf_export_contains_complete_periodic_grid(tmp_path):
 
 
 def test_limited_area_grid_is_compact_boundary_ordered_and_parent_linked():
-    spec = LimitedAreaSpec(
+    spec = LimitedAreaGridSpec(
         "R02B01",
         lon_min=-20.0,
         lon_max=20.0,

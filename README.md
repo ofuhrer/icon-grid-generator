@@ -22,12 +22,12 @@ python -m pip install -e ".[netcdf,xarray]"
 
 ## Usage
 
-Generate a spherical grid:
+Generate a global spherical grid:
 
 ```python
-from grid_generator import generate_grid
+from grid_generator import GlobalGridSpec, generate_grid
 
-grid = generate_grid("R02B03")
+grid = generate_grid(GlobalGridSpec(root=2, bisections=3))
 print(grid.dims)
 ```
 
@@ -43,9 +43,9 @@ print(grid.metadata["grid_geometry"])
 Extract a limited-area grid from a generated global parent:
 
 ```python
-from grid_generator import LimitedAreaSpec, generate_grid
+from grid_generator import LimitedAreaGridSpec, generate_grid
 
-spec = LimitedAreaSpec(
+spec = LimitedAreaGridSpec(
     "R02B03",
     lon_min=-20.0,
     lon_max=20.0,
@@ -54,6 +54,12 @@ spec = LimitedAreaSpec(
     boundary_depth=2,
 )
 grid = generate_grid(spec, options={"max_cells": None})
+```
+
+For global grids, the compact RxxByy string remains available as shorthand:
+
+```python
+grid = generate_grid("R02B03")
 ```
 
 Write an ICON-style NetCDF file:

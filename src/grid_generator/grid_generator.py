@@ -261,13 +261,34 @@ ICON_VARIABLE_ATTRS: dict[str, dict[str, Any]] = {
 
 
 @dataclass(frozen=True)
-class IconGridSpec:
+class GlobalGridSpec:
     """Normalized ICON RxxByy grid specification."""
 
     root: int
     bisections: int
-    frequency: int
-    name: str
+    frequency: int = 0
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, int) or isinstance(self.root, bool):
+            raise TypeError("global grid root must be an integer")
+        if self.root < 1:
+            raise ValueError("global grid root must be at least 1")
+        if not isinstance(self.bisections, int) or isinstance(self.bisections, bool):
+            raise TypeError("global grid bisections must be an integer")
+        if self.bisections < 0:
+            raise ValueError("global grid bisections must be non-negative")
+
+        expected_frequency = self.root * 2**self.bisections
+        if self.frequency not in (0, expected_frequency):
+            raise ValueError("global grid frequency must equal root * 2**bisections")
+        object.__setattr__(self, "frequency", expected_frequency)
+        if not self.name:
+            object.__setattr__(
+                self,
+                "name",
+                f"R{self.root:02d}B{self.bisections:02d}",
+            )
 
     @property
     def expected_cells(self) -> int:
@@ -324,7 +345,7 @@ class TorusGridSpec:
 
 
 @dataclass(frozen=True)
-class LimitedAreaSpec:
+class LimitedAreaGridSpec:
     """Limited-area grid extracted from a generated global parent grid."""
 
     parent_grid_name: str
@@ -370,6 +391,12 @@ class LimitedAreaSpec:
         return 0
 
 
+# Backward-compatible module aliases. The package-level public API exports the
+# symmetric *GridSpec names above.
+IconGridSpec = GlobalGridSpec
+LimitedAreaSpec = LimitedAreaGridSpec
+
+
 @dataclass(frozen=True)
 class IconGridOptions:
     """Options for pure Python ICON grid generation."""
@@ -385,7 +412,7 @@ class IconGridOptions:
 class IconGrid:
     """ICON grid geometry, topology, metrics, and NetCDF export support."""
 
-    spec: IconGridSpec | TorusGridSpec | LimitedAreaSpec
+    spec: GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec
     options: IconGridOptions
     vertices: np.ndarray
     cells: np.ndarray
@@ -503,25 +530,25 @@ class IconGrid:
 
 
 def generate_grid(
-    grid_name: str | IconGridSpec | TorusGridSpec | LimitedAreaSpec,
+    spec: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
     options: IconGridOptions | Mapping[str, Any] | None = None,
 ) -> IconGrid:
     """Create a pure Python ICON geodesic, torus, or limited-area grid."""
-    spec = parse_grid_spec(grid_name) if isinstance(grid_name, str) else grid_name
-    if not isinstance(spec, (IconGridSpec, TorusGridSpec, LimitedAreaSpec)):
-        raise TypeError("grid_name must be an RxxByy string or a supported grid spec")
+    grid_spec = parse_grid_spec(spec) if isinstance(spec, str) else spec
+    if not isinstance(grid_spec, (GlobalGridSpec, TorusGridSpec, LimitedAreaGridSpec)):
+        raise TypeError("spec must be an RxxByy string or a supported grid spec")
     resolved_options = _resolve_options(options)
-    _validate_options(spec, resolved_options)
+    _validate_options(grid_spec, resolved_options)
 
-    if isinstance(spec, TorusGridSpec):
-        return _generate_torus_grid(spec, resolved_options)
-    if isinstance(spec, LimitedAreaSpec):
-        return _generate_limited_area_grid(spec, resolved_options)
-    return _generate_grid(spec, resolved_options)
+    if isinstance(grid_spec, TorusGridSpec):
+        return _generate_torus_grid(grid_spec, resolved_options)
+    if isinstance(grid_spec, LimitedAreaGridSpec):
+        return _generate_limited_area_grid(grid_spec, resolved_options)
+    return _generate_grid(grid_spec, resolved_options)
 
 
 def _validate_options(
-    spec: IconGridSpec | TorusGridSpec | LimitedAreaSpec,
+    spec: GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
     options: IconGridOptions,
 ) -> None:
     validate_grid_options(spec, options)
@@ -578,10 +605,10 @@ def _require_complete_icon_grid(grid: IconGrid) -> None:
 
 
 def parse_grid_spec(
-    grid_name: str | IconGridSpec | TorusGridSpec | LimitedAreaSpec,
-) -> IconGridSpec | TorusGridSpec | LimitedAreaSpec:
+    grid_name: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
+) -> GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec:
     """Parse and normalize an RxxByy grid name."""
-    if isinstance(grid_name, (IconGridSpec, TorusGridSpec, LimitedAreaSpec)):
+    if isinstance(grid_name, (GlobalGridSpec, TorusGridSpec, LimitedAreaGridSpec)):
         return grid_name
     if not isinstance(grid_name, str):
         raise TypeError("grid_name must be a string such as 'R02B03'")
@@ -597,12 +624,9 @@ def parse_grid_spec(
     if bisections < 0:
         raise ValueError("grid bisections must be non-negative")
 
-    frequency = root * 2**bisections
-    return IconGridSpec(
+    return GlobalGridSpec(
         root=root,
         bisections=bisections,
-        frequency=frequency,
-        name=f"R{root:02d}B{bisections:02d}",
     )
 
 
@@ -622,7 +646,7 @@ def _resolve_options(options: IconGridOptions | Mapping[str, Any] | None) -> Ico
     return IconGridOptions(**dict(options))
 
 
-def _generate_grid(spec: IconGridSpec, options: IconGridOptions) -> IconGrid:
+def _generate_grid(spec: GlobalGridSpec, options: IconGridOptions) -> IconGrid:
     geometry = SphericalIcosahedralGeometry().build(spec, options)
     geometry = FortranOrderingBuilder().order_spherical_bisection(spec, options, geometry)
     topology = GlobalTopologyBuilder().build(spec, options, geometry)
@@ -690,7 +714,7 @@ def _generate_torus_grid(spec: TorusGridSpec, options: IconGridOptions) -> IconG
     )
 
 
-def _generate_limited_area_grid(spec: LimitedAreaSpec, options: IconGridOptions) -> IconGrid:
+def _generate_limited_area_grid(spec: LimitedAreaGridSpec, options: IconGridOptions) -> IconGrid:
     geometry, topology, metrics, refinement = LimitedAreaExtractor().build(spec, options)
     metadata = _metadata(spec, options, metrics.fields)
     return IconGrid(
@@ -901,7 +925,7 @@ def _refine_triangles(
     )
 
 
-def _check_expected_counts(spec: IconGridSpec, vertices: np.ndarray, cells: np.ndarray) -> None:
+def _check_expected_counts(spec: GlobalGridSpec, vertices: np.ndarray, cells: np.ndarray) -> None:
     if cells.shape[0] != spec.expected_cells:
         raise RuntimeError(f"generated {cells.shape[0]} cells, expected {spec.expected_cells}")
     if vertices.shape[0] != spec.expected_vertices:
@@ -1486,7 +1510,7 @@ def _zonal_meridional_components(
 
 
 def _refinement_fields(
-    spec: IconGridSpec,
+    spec: GlobalGridSpec,
     options: IconGridOptions,
     vertices: np.ndarray,
     cells: np.ndarray,
@@ -1636,7 +1660,7 @@ def _parent_edge_fields(
 
 
 def _metadata(
-    spec: IconGridSpec | TorusGridSpec | LimitedAreaSpec,
+    spec: GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
     options: IconGridOptions,
     geometry: dict[str, np.ndarray] | None = None,
 ) -> dict[str, Any]:
@@ -1671,7 +1695,7 @@ def _metadata(
                 "torus_edge_length": spec.edge_length,
             }
         )
-    elif isinstance(spec, LimitedAreaSpec):
+    elif isinstance(spec, LimitedAreaGridSpec):
         metadata.update(
             {
                 "grid_geometry": 3,
@@ -1696,10 +1720,10 @@ def _metadata(
 
 
 def _spec_uuid(
-    spec: IconGridSpec | TorusGridSpec | LimitedAreaSpec,
+    spec: GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
     options: IconGridOptions,
 ) -> str:
-    if isinstance(spec, IconGridSpec):
+    if isinstance(spec, GlobalGridSpec):
         return grid_uuid(
             spec.name,
             sphere_radius=options.sphere_radius,

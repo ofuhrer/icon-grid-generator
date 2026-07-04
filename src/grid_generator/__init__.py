@@ -3,8 +3,8 @@
 from .grid_generator import (
     IconGrid,
     IconGridOptions,
-    IconGridSpec,
-    LimitedAreaSpec,
+    GlobalGridSpec,
+    LimitedAreaGridSpec,
     TorusGridSpec,
     generate_grid,
 )
@@ -12,8 +12,8 @@ from .grid_generator import (
 __all__ = [
     "IconGrid",
     "IconGridOptions",
-    "IconGridSpec",
-    "LimitedAreaSpec",
+    "GlobalGridSpec",
+    "LimitedAreaGridSpec",
     "TorusGridSpec",
     "generate_grid",
 ]
