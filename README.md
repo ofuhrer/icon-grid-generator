@@ -115,6 +115,9 @@ mkdocs serve
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines, review
+expectations, and domain-specific requirements for grid math and NetCDF changes.
+
 Run the checks used by CI:
 
 ```bash
