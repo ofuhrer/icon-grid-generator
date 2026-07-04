@@ -1552,7 +1552,13 @@ def test_safety_cap_fails_clearly_and_can_be_changed_or_disabled():
         generate_grid("R02B02", options={"max_cells": 10})
 
     assert generate_grid("R02B02", options={"max_cells": 2_000}).dims["cell"] == 1280
+    assert IconGridOptions().max_cells == 2_000_000
     assert generate_grid("R01B01", options={"max_cells": None}).dims["cell"] == 80
+
+
+def test_global_grid_generation_rejects_int32_index_overflow():
+    with pytest.raises(ValueError, match="int32 index limit"):
+        generate_grid("R02B13", options={"max_cells": None})
 
 
 @pytest.mark.parametrize(
@@ -1683,6 +1689,59 @@ def test_private_build_edges_rejects_open_mesh():
 
     with pytest.raises(RuntimeError, match="adjacent cells"):
         gg._build_edges(cells)
+
+
+def test_private_build_edges_preserves_first_seen_edge_order():
+    cells = np.array(
+        [
+            [0, 1, 2],
+            [0, 3, 1],
+            [1, 3, 2],
+            [0, 2, 3],
+        ],
+        dtype=np.int32,
+    )
+
+    edges, cell_edges, edge_cells = gg._build_edges(cells)
+
+    assert np.array_equal(
+        edges,
+        np.array([[0, 1], [1, 2], [0, 2], [0, 3], [1, 3], [2, 3]], dtype=np.int32),
+    )
+    assert np.array_equal(
+        cell_edges,
+        np.array([[0, 1, 2], [3, 4, 0], [4, 5, 1], [2, 5, 3]], dtype=np.int32),
+    )
+    assert np.array_equal(
+        edge_cells,
+        np.array([[0, 1], [0, 2], [0, 3], [1, 3], [1, 2], [2, 3]], dtype=np.int32),
+    )
+
+
+def test_private_spherical_triangle_areas_match_scalar_helper():
+    points = unit_rows(
+        np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ]
+        )
+    )
+    a = points[[0, 0]]
+    b = points[[1, 1]]
+    c = points[[2, 3]]
+
+    vectorized = gg._spherical_triangle_areas(a, b, c)
+    scalar = np.array(
+        [
+            gg._spherical_triangle_area(a[0], b[0], c[0]),
+            gg._spherical_triangle_area(a[1], b[1], c[1]),
+        ]
+    )
+
+    assert np.allclose(vectorized, scalar)
 
 
 def test_private_check_expected_counts_reports_mismatch():

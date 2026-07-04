@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+MAX_INDEXED_GRID_ELEMENTS = np.iinfo(np.int32).max
+
 
 def finite_float_option(name: str, value: Any) -> float:
     """Return `value` as float after rejecting booleans, non-numbers, and NaNs."""
@@ -48,3 +50,13 @@ def validate_grid_options(spec: Any, options: Any) -> None:
             f"{spec.name} has {spec.expected_cells} cells, exceeding max_cells="
             f"{options.max_cells}"
         )
+    for name, size in (
+        ("cells", spec.expected_cells),
+        ("edges", spec.expected_edges),
+        ("vertices", spec.expected_vertices),
+    ):
+        if size > MAX_INDEXED_GRID_ELEMENTS:
+            raise ValueError(
+                f"{spec.name} has {size} {name}, exceeding the int32 index limit "
+                f"of {MAX_INDEXED_GRID_ELEMENTS}"
+            )

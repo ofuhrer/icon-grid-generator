@@ -10,6 +10,9 @@ from ._types import GeometryData, RefinementData, TopologyData
 class GlobalRefinementBuilder:
     """Compute parent-provenance fields for global bisection refinement."""
 
+    def __init__(self, context: Any | None = None) -> None:
+        self.context = context
+
     def build(
         self,
         spec: Any,
@@ -26,5 +29,6 @@ class GlobalRefinementBuilder:
                 geometry.vertices,
                 geometry.cells,
                 topology.edges,
+                self.context,
             )
         )

@@ -20,17 +20,22 @@ CHILD_ORDER = {
 class IconOrderingBuilder:
     """Apply deterministic ICON child ordering."""
 
+    def __init__(self, context: Any | None = None) -> None:
+        self.context = context
+
     def order_spherical_bisection(self, spec: Any, options: Any, geometry: GeometryData) -> GeometryData:
         if getattr(spec, "bisections", 0) == 0:
             return geometry
 
         from . import grid_generator as gg
 
-        parent = gg.generate_grid(
-            f"R{spec.root:02d}B{spec.bisections - 1:02d}",
-            options=options,
+        context = self.context if self.context is not None else gg._GlobalGenerationContext()
+        parent_vertex_index, parent = gg._parent_vertex_indices_cached(
+            spec,
+            options,
+            geometry.vertices,
+            context,
         )
-        parent_vertex_index = gg._parent_vertex_indices(geometry.vertices, parent)
         parent_cell_index, parent_cell_type = gg._parent_cell_fields(
             geometry.cells,
             parent_vertex_index,

@@ -44,9 +44,33 @@ from ._validation import finite_float_option, validate_grid_options
 
 IconNetcdfField = tuple[str, tuple[str, ...], Any, dict[str, Any]]
 
+
+@dataclass
+class _GlobalGenerationContext:
+    """Shared internal state for one global generation request."""
+
+    grids: dict[tuple[int, int], "IconGrid"] = field(default_factory=dict)
+    parent_data: dict[tuple[int, int], "_GlobalParentData"] = field(default_factory=dict)
+    parent_vertex_indices: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
+
+    def key(self, spec: "GlobalGridSpec") -> tuple[int, int]:
+        return spec.root, spec.bisections
+
+
+@dataclass(frozen=True)
+class _GlobalParentData:
+    """Geometry and topology needed for child ordering and provenance."""
+
+    spec: "GlobalGridSpec"
+    vertices: np.ndarray
+    cells: np.ndarray
+    edges: np.ndarray
+    cell_edges: np.ndarray
+    edge_center_xyz: np.ndarray
+
 GRID_NAME_RE = re.compile(r"^R0*(\d+)B0*(\d+)$", re.IGNORECASE)
 EARTH_RADIUS_M = 6_371_229.0
-POINT_MATCH_DECIMALS = 12
+POINT_MATCH_DECIMALS = 11
 XYZ_LABELS = np.array(["x", "y", "z"])
 CELL_VERTEX_LABELS = np.array([0, 1, 2], dtype=np.int32)
 EDGE_VERTEX_LABELS = np.array([0, 1], dtype=np.int32)
@@ -723,7 +747,7 @@ _SUPPORTED_GRID_SPEC_TYPES = (
 class IconGridOptions:
     """Options for pure Python ICON grid generation."""
 
-    max_cells: int | None = 1_000_000
+    max_cells: int | None = 2_000_000
     radius: float = 1.0
     sphere_radius: float = EARTH_RADIUS_M
     rotation_axis: tuple[float, float, float] = (1.0, 0.0, 0.0)
@@ -873,7 +897,7 @@ def generate_grid(
         return _generate_planar_grid(grid_spec, resolved_options)
     if isinstance(grid_spec, LimitedAreaGridSpec):
         return _generate_limited_area_grid(grid_spec, resolved_options)
-    return _generate_grid(grid_spec, resolved_options)
+    return _generate_grid(grid_spec, resolved_options, _GlobalGenerationContext())
 
 
 def _validate_options(
@@ -982,15 +1006,26 @@ def _resolve_options(options: IconGridOptions | Mapping[str, Any] | None) -> Ico
     return IconGridOptions(**dict(options))
 
 
-def _generate_grid(spec: GlobalGridSpec, options: IconGridOptions) -> IconGrid:
+def _generate_grid(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    context: _GlobalGenerationContext | None = None,
+) -> IconGrid:
+    if context is None:
+        context = _GlobalGenerationContext()
+    cache_key = context.key(spec)
+    cached = context.grids.get(cache_key)
+    if cached is not None:
+        return cached
+
     geometry = SphericalIcosahedralGeometry().build(spec, options)
-    geometry = IconOrderingBuilder().order_spherical_bisection(spec, options, geometry)
+    geometry = IconOrderingBuilder(context).order_spherical_bisection(spec, options, geometry)
     topology = GlobalTopologyBuilder().build(spec, options, geometry)
     metrics = SphericalMetricsBuilder().build(options, geometry, topology)
-    refinement = GlobalRefinementBuilder().build(spec, options, geometry, topology)
+    refinement = GlobalRefinementBuilder(context).build(spec, options, geometry, topology)
     metadata = _metadata(spec, options, metrics.fields)
 
-    return IconGrid(
+    grid = IconGrid(
         spec=spec,
         options=options,
         vertices=geometry.vertices,
@@ -1015,6 +1050,58 @@ def _generate_grid(spec: GlobalGridSpec, options: IconGridOptions) -> IconGrid:
         refinement=refinement.fields,
         metadata=metadata,
     )
+    context.grids[cache_key] = grid
+    return grid
+
+
+def _parent_grid(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    context: _GlobalGenerationContext,
+) -> IconGrid | _GlobalParentData:
+    if spec.bisections == 0:
+        raise ValueError("grid has no bisection parent")
+    parent_spec = GlobalGridSpec(root=spec.root, bisections=spec.bisections - 1)
+    parent_key = context.key(parent_spec)
+    full_parent = context.grids.get(parent_key)
+    if full_parent is not None:
+        return full_parent
+    parent_data = context.parent_data.get(parent_key)
+    if parent_data is not None:
+        return parent_data
+
+    parent_geometry = SphericalIcosahedralGeometry().build(parent_spec, options)
+    parent_geometry = IconOrderingBuilder(context).order_spherical_bisection(
+        parent_spec,
+        options,
+        parent_geometry,
+    )
+    parent_topology = GlobalTopologyBuilder().build(parent_spec, options, parent_geometry)
+    parent_data = _GlobalParentData(
+        spec=parent_spec,
+        vertices=parent_geometry.vertices,
+        cells=parent_geometry.cells,
+        edges=parent_topology.edges,
+        cell_edges=parent_topology.cell_edges,
+        edge_center_xyz=parent_topology.edge_center_xyz,
+    )
+    context.parent_data[parent_key] = parent_data
+    return parent_data
+
+
+def _parent_vertex_indices_cached(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    vertices: np.ndarray,
+    context: _GlobalGenerationContext,
+) -> tuple[np.ndarray, IconGrid | _GlobalParentData]:
+    parent = _parent_grid(spec, options, context)
+    cache_key = context.key(spec)
+    parent_vertex_index = context.parent_vertex_indices.get(cache_key)
+    if parent_vertex_index is None:
+        parent_vertex_index = _parent_vertex_indices(vertices, parent)
+        context.parent_vertex_indices[cache_key] = parent_vertex_index
+    return parent_vertex_index, parent
 
 
 def _generate_torus_grid(spec: TorusGridSpec, options: IconGridOptions) -> IconGrid:
@@ -1369,37 +1456,48 @@ def _cell_centers(vertices: np.ndarray, cells: np.ndarray, radius: float) -> np.
 
 
 def _build_edges(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    edge_ids: dict[tuple[int, int], int] = {}
-    edges: list[tuple[int, int]] = []
-    edge_cells: list[list[int]] = []
-    cell_edges = np.empty((cells.shape[0], 3), dtype=np.int32)
+    cell_count = cells.shape[0]
+    local_edges = np.stack(
+        (
+            cells[:, (0, 1)],
+            cells[:, (1, 2)],
+            cells[:, (2, 0)],
+        ),
+        axis=1,
+    ).reshape(-1, 2)
+    sorted_edges = np.sort(local_edges, axis=1).astype(np.int32, copy=False)
+    flat_cells = np.repeat(np.arange(cell_count, dtype=np.int32), 3)
 
-    for cell_index, (v0, v1, v2) in enumerate(cells):
-        for local_index, pair in enumerate(((v0, v1), (v1, v2), (v2, v0))):
-            key = tuple(sorted((int(pair[0]), int(pair[1]))))
-            edge_id = edge_ids.get(key)
-            if edge_id is None:
-                edge_id = len(edges)
-                edge_ids[key] = edge_id
-                edges.append(key)
-                edge_cells.append([cell_index])
-            else:
-                edge_cells[edge_id].append(cell_index)
-            cell_edges[cell_index, local_index] = edge_id
+    order = np.lexsort((sorted_edges[:, 1], sorted_edges[:, 0]))
+    ordered_edges = sorted_edges[order]
+    is_new = np.empty(ordered_edges.shape[0], dtype=bool)
+    is_new[0] = True
+    is_new[1:] = np.any(ordered_edges[1:] != ordered_edges[:-1], axis=1)
+    group_start = np.flatnonzero(is_new)
+    group_count = np.diff(np.r_[group_start, ordered_edges.shape[0]])
+    bad_groups = np.flatnonzero(group_count != 2)
+    if bad_groups.size:
+        bad_edge = int(bad_groups[0])
+        raise RuntimeError(
+            f"edge {bad_edge} has {int(group_count[bad_edge])} adjacent cells, expected 2"
+        )
 
-    edge_cell_array = np.full((len(edges), 2), -1, dtype=np.int32)
-    for edge_index, adjacent_cells in enumerate(edge_cells):
-        if len(adjacent_cells) != 2:
-            raise RuntimeError(
-                f"edge {edge_index} has {len(adjacent_cells)} adjacent cells, expected 2"
-            )
-        edge_cell_array[edge_index, :] = adjacent_cells
+    group_id_sorted = np.cumsum(is_new, dtype=np.int32) - 1
+    group_id_flat = np.empty_like(group_id_sorted)
+    group_id_flat[order] = group_id_sorted
 
-    return (
-        np.asarray(edges, dtype=np.int32),
-        cell_edges,
-        edge_cell_array,
-    )
+    first_flat = np.minimum.reduceat(order, group_start)
+    second_flat = np.maximum.reduceat(order, group_start)
+    group_order = np.argsort(first_flat)
+    edge_id_by_group = np.empty(group_order.shape[0], dtype=np.int32)
+    edge_id_by_group[group_order] = np.arange(group_order.shape[0], dtype=np.int32)
+
+    edges = ordered_edges[group_start][group_order]
+    edge_cells = np.column_stack((flat_cells[first_flat], flat_cells[second_flat]))[
+        group_order
+    ]
+    cell_edges = edge_id_by_group[group_id_flat].reshape(cell_count, 3)
+    return edges, cell_edges, edge_cells
 
 
 def _write_icon_dimensions(dataset: Any, grid: IconGrid) -> None:
@@ -1706,6 +1804,74 @@ def _end_index_fixed(name: str, size: int) -> np.ndarray:
     return values
 
 
+def _fixed_incidence(
+    owners: np.ndarray,
+    values: np.ndarray,
+    row_count: int,
+    width: int,
+) -> np.ndarray:
+    counts = np.bincount(owners, minlength=row_count)
+    oversized = np.flatnonzero(counts > width)
+    if oversized.size:
+        raise RuntimeError(
+            f"vertex {int(oversized[0])} has {int(counts[oversized[0]])} incident "
+            f"items, expected at most {width}"
+        )
+
+    order = np.argsort(owners, kind="stable")
+    sorted_owners = owners[order]
+    start_by_owner = np.r_[0, np.cumsum(counts[:-1])]
+    positions = np.arange(owners.size, dtype=np.int32) - start_by_owner[sorted_owners]
+    incidence = np.zeros((row_count, width), dtype=np.int32)
+    incidence[sorted_owners, positions] = values[order]
+    return incidence
+
+
+def _sort_fixed_around_vertices(
+    vertices: np.ndarray,
+    ids: np.ndarray,
+    *,
+    points: np.ndarray | None = None,
+) -> np.ndarray:
+    if points is None:
+        points = _normalize_rows(vertices)
+    origins = _normalize_rows(vertices)
+    references = np.tile(np.array([0.0, 0.0, 1.0]), (vertices.shape[0], 1))
+    pole_mask = np.abs(origins[:, 2]) > 0.9
+    references[pole_mask] = np.array([1.0, 0.0, 0.0])
+
+    axis_1 = references - np.sum(references * origins, axis=1)[:, np.newaxis] * origins
+    axis_1 = _normalize_rows(axis_1)
+    axis_2 = np.cross(origins, axis_1)
+
+    valid = ids > 0
+    safe_ids = np.where(valid, ids, 1)
+    point_values = points[safe_ids - 1]
+    tangent = point_values - np.sum(
+        point_values * origins[:, np.newaxis, :],
+        axis=2,
+    )[:, :, np.newaxis] * origins[:, np.newaxis, :]
+    angles = np.arctan2(
+        np.sum(tangent * axis_2[:, np.newaxis, :], axis=2),
+        np.sum(tangent * axis_1[:, np.newaxis, :], axis=2),
+    )
+    angles = np.where(valid, angles, np.inf)
+    angle_order = np.argsort(angles, axis=1, kind="stable")
+    ordered = np.take_along_axis(ids, angle_order, axis=1)
+
+    counts = valid.sum(axis=1)
+    min_position = np.argmin(np.where(ordered > 0, ordered, np.iinfo(np.int32).max), axis=1)
+    rotation = (min_position[:, np.newaxis] + np.arange(ids.shape[1])) % np.maximum(
+        counts[:, np.newaxis],
+        1,
+    )
+    rotated = np.take_along_axis(ordered, rotation, axis=1)
+    return np.where(np.arange(ids.shape[1]) < counts[:, np.newaxis], rotated, 0).astype(
+        np.int32,
+        copy=False,
+    )
+
+
 def _icon_connectivity(
     vertices: np.ndarray,
     cells: np.ndarray,
@@ -1716,58 +1882,52 @@ def _icon_connectivity(
 ) -> dict[str, np.ndarray]:
     n_vertices = vertices.shape[0]
     c2e = np.asarray(cell_edges, dtype=np.int32)
-    c2c = np.empty_like(c2e)
-    orientation = np.empty_like(c2e)
-    for cell_index in range(cells.shape[0]):
-        for local_index, edge_index in enumerate(c2e[cell_index]):
-            adjacent = edge_cells[edge_index]
-            c2c[cell_index, local_index] = (
-                adjacent[1] if adjacent[0] == cell_index else adjacent[0]
-            )
-            orientation[cell_index, local_index] = (
-                1 if adjacent[0] == cell_index else -1
-            )
+    adjacent = edge_cells[c2e]
+    cell_ids = np.arange(cells.shape[0], dtype=np.int32)[:, np.newaxis]
+    first_adjacent = adjacent[:, :, 0] == cell_ids
+    c2c = np.where(first_adjacent, adjacent[:, :, 1], adjacent[:, :, 0]).astype(
+        np.int32,
+        copy=False,
+    )
+    orientation = np.where(first_adjacent, 1, -1).astype(np.int32, copy=False)
 
-    incident_cells: list[list[int]] = [[] for _ in range(n_vertices)]
-    incident_edges: list[list[int]] = [[] for _ in range(n_vertices)]
-    incident_vertices: list[list[int]] = [[] for _ in range(n_vertices)]
-    for cell_index, cell in enumerate(cells):
-        for vertex in cell:
-            incident_cells[int(vertex)].append(cell_index + 1)
-    for edge_index, (v0, v1) in enumerate(edges):
-        incident_edges[int(v0)].append(edge_index + 1)
-        incident_edges[int(v1)].append(edge_index + 1)
-        incident_vertices[int(v0)].append(int(v1) + 1)
-        incident_vertices[int(v1)].append(int(v0) + 1)
+    cell_owners = cells.reshape(-1)
+    cell_values = np.repeat(
+        np.arange(1, cells.shape[0] + 1, dtype=np.int32),
+        3,
+    )
+    edge_values = np.arange(1, edges.shape[0] + 1, dtype=np.int32)
+    edge_owners = np.concatenate((edges[:, 0], edges[:, 1]))
+    incident_edges = np.concatenate((edge_values, edge_values))
+    incident_vertices = np.concatenate((edges[:, 1] + 1, edges[:, 0] + 1)).astype(
+        np.int32,
+        copy=False,
+    )
 
-    v2c = np.zeros((n_vertices, 6), dtype=np.int32)
-    v2e = np.zeros((n_vertices, 6), dtype=np.int32)
-    v2v = np.zeros((n_vertices, 6), dtype=np.int32)
-    edge_orientation = np.zeros((n_vertices, 6), dtype=np.int32)
-    edge_lookup = {edge_id + 1: tuple(edge) for edge_id, edge in enumerate(edges)}
     edge_centers = _edge_centers(vertices, edges, 1.0)
     unit_centers = _normalize_rows(cell_center_xyz)
 
-    for vertex in range(n_vertices):
-        ordered_vertices = _sort_around_vertex(vertices, vertex, incident_vertices[vertex])
-        ordered_edges = _sort_around_vertex(
-            vertices,
-            vertex,
-            incident_edges[vertex],
-            points=edge_centers,
-        )
-        ordered_cells = _sort_around_vertex(
-            vertices,
-            vertex,
-            incident_cells[vertex],
-            points=unit_centers,
-        )
-        v2v[vertex, : len(ordered_vertices)] = ordered_vertices
-        v2e[vertex, : len(ordered_edges)] = ordered_edges
-        v2c[vertex, : len(ordered_cells)] = ordered_cells
-        for pos, edge_id in enumerate(ordered_edges):
-            edge = edge_lookup[edge_id]
-            edge_orientation[vertex, pos] = 1 if edge[0] == vertex else -1
+    v2v = _sort_fixed_around_vertices(
+        vertices,
+        _fixed_incidence(edge_owners, incident_vertices, n_vertices, 6),
+    )
+    v2e = _sort_fixed_around_vertices(
+        vertices,
+        _fixed_incidence(edge_owners, incident_edges, n_vertices, 6),
+        points=edge_centers,
+    )
+    v2c = _sort_fixed_around_vertices(
+        vertices,
+        _fixed_incidence(cell_owners, cell_values, n_vertices, 6),
+        points=unit_centers,
+    )
+    edge_start_vertices = edges[np.maximum(v2e - 1, 0), 0]
+    vertex_ids = np.arange(n_vertices, dtype=np.int32)[:, np.newaxis]
+    edge_orientation = np.where(edge_start_vertices == vertex_ids, 1, -1).astype(
+        np.int32,
+        copy=False,
+    )
+    edge_orientation = np.where(v2e > 0, edge_orientation, 0)
 
     return {
         "c2e": c2e,
@@ -1936,6 +2096,7 @@ def _refinement_fields(
     vertices: np.ndarray,
     cells: np.ndarray,
     edges: np.ndarray,
+    context: _GlobalGenerationContext | None = None,
 ) -> dict[str, np.ndarray]:
     """Return ICON refinement-control and parent-provenance fields.
 
@@ -1963,11 +2124,14 @@ def _refinement_fields(
     if spec.bisections == 0:
         return refinement
 
-    parent = generate_grid(
-        f"R{spec.root:02d}B{spec.bisections - 1:02d}",
-        options=options,
+    if context is None:
+        context = _GlobalGenerationContext()
+    parent_vertex_index, parent = _parent_vertex_indices_cached(
+        spec,
+        options,
+        vertices,
+        context,
     )
-    parent_vertex_index = _parent_vertex_indices(vertices, parent)
     refinement["parent_vertex_index"] = parent_vertex_index
     refinement["parent_cell_index"], refinement["parent_cell_type"] = (
         _parent_cell_fields(cells, parent_vertex_index, parent)
@@ -2378,36 +2542,43 @@ def _geometric_dual_areas(
 ) -> np.ndarray:
     unit_centers = _normalize_rows(cell_center_xyz)
     dual = np.zeros(n_vertices, dtype=np.float64)
-    for vertex_index in range(n_vertices):
-        cell_indices = ordered_cells_of_vertex[vertex_index]
-        cell_indices = cell_indices[cell_indices > 0] - 1
-        if cell_indices.size < 3:
+    valid = ordered_cells_of_vertex > 0
+    counts = valid.sum(axis=1)
+    for count in np.unique(counts):
+        if count < 3:
             continue
-        polygon = unit_centers[cell_indices]
-        area = 0.0
-        anchor = polygon[0]
-        for index in range(1, polygon.shape[0] - 1):
-            area += _spherical_triangle_area(anchor, polygon[index], polygon[index + 1])
-        dual[vertex_index] = area * sphere_radius**2
+        rows = np.flatnonzero(counts == count)
+        cell_indices = ordered_cells_of_vertex[rows, :count] - 1
+        polygons = unit_centers[cell_indices]
+        anchors = np.repeat(polygons[:, :1, :], count - 2, axis=1)
+        area = _spherical_triangle_areas(
+            anchors.reshape(-1, 3),
+            polygons[:, 1:-1, :].reshape(-1, 3),
+            polygons[:, 2:, :].reshape(-1, 3),
+        ).reshape(rows.size, count - 2)
+        dual[rows] = area.sum(axis=1) * sphere_radius**2
     return dual
 
 
-def _spherical_triangle_area(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    normal_ab = _normalize_rows(np.cross(a[np.newaxis, :], b[np.newaxis, :]))[0]
-    normal_ac = _normalize_rows(np.cross(a[np.newaxis, :], c[np.newaxis, :]))[0]
-    normal_ba = _normalize_rows(np.cross(b[np.newaxis, :], a[np.newaxis, :]))[0]
-    normal_bc = _normalize_rows(np.cross(b[np.newaxis, :], c[np.newaxis, :]))[0]
-    normal_ca = _normalize_rows(np.cross(c[np.newaxis, :], a[np.newaxis, :]))[0]
-    normal_cb = _normalize_rows(np.cross(c[np.newaxis, :], b[np.newaxis, :]))[0]
-    angles = np.array(
-        [
-            np.arccos(np.clip(np.dot(normal_ab, normal_ac), -1.0, 1.0)),
-            np.arccos(np.clip(np.dot(normal_ba, normal_bc), -1.0, 1.0)),
-            np.arccos(np.clip(np.dot(normal_ca, normal_cb), -1.0, 1.0)),
-        ],
-        dtype=np.float64,
+def _spherical_triangle_areas(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    normal_ab = _normalize_rows(np.cross(a, b))
+    normal_ac = _normalize_rows(np.cross(a, c))
+    normal_ba = -normal_ab
+    normal_bc = _normalize_rows(np.cross(b, c))
+    normal_ca = -normal_ac
+    normal_cb = -normal_bc
+    angles = np.column_stack(
+        (
+            np.arccos(np.clip(np.sum(normal_ab * normal_ac, axis=1), -1.0, 1.0)),
+            np.arccos(np.clip(np.sum(normal_ba * normal_bc, axis=1), -1.0, 1.0)),
+            np.arccos(np.clip(np.sum(normal_ca * normal_cb, axis=1), -1.0, 1.0)),
+        )
     )
-    return float(angles.sum() - np.pi)
+    return angles.sum(axis=1) - np.pi
+
+
+def _spherical_triangle_area(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    return float(_spherical_triangle_areas(a[np.newaxis, :], b[np.newaxis, :], c[np.newaxis, :])[0])
 
 
 def _edge_lengths(vertices: np.ndarray, edges: np.ndarray, sphere_radius: float) -> np.ndarray:

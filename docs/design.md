@@ -35,6 +35,24 @@ deterministic pipeline:
 - Parent/provenance indices belong in `IconGrid.refinement`; metadata should
   carry descriptive scalar attributes only.
 
+## Limitations
+
+- Connectivity and NetCDF index fields use signed 32-bit integer arrays. Global
+  grids up to current large operational scales such as `R02B11` are within that
+  range; generation fails early when cells, edges, or vertices would exceed the
+  int32 index limit.
+- Parent/provenance fields for bisection grids are matched from floating-point
+  Cartesian coordinates rounded to an internal tolerance. This is deterministic
+  for supported global resolutions, but structural parent tracking would be a
+  stronger approach for substantially finer grids.
+- Spherical metrics use double-precision trigonometric formulas. They are
+  appropriate for supported resolutions, but extremely small triangles can make
+  angle-sum area formulas and `arccos`-based distances more sensitive to
+  floating-point cancellation.
+- The implementation assumes closed global triangular meshes have vertex
+  valence at most six. Limited-area and planar grids use separate open-mesh
+  paths where boundary sentinels are expected.
+
 ## Testing Expectations
 
 Changes to geometry, topology, metrics, refinement, limited-area extraction, or
