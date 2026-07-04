@@ -1,0 +1,44 @@
+name: DCO
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check Developer Certificate of Origin sign-offs
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          while IFS= read -r commit; do
+            if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "::error title=Missing DCO sign-off::Commit $commit does not include a Signed-off-by line."
+              missing=1
+            fi
+          done < <(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Add a Developer Certificate of Origin sign-off to each commit:"
+            echo
+            echo "    git commit -s"
+            echo
+            echo "To fix an existing branch, amend or rebase the commits with a"
+            echo "Signed-off-by line and force-push the branch."
+            exit 1
+          fi

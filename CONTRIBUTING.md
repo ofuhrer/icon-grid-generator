@@ -17,6 +17,33 @@ Open an issue or discussion before starting work when a change:
 Small fixes, docs improvements, tests, and clearly scoped refactors can go
 straight to a pull request.
 
+## Licensing And Contributor Rights
+
+ICON Grid Generator is distributed under the BSD 3-Clause License. By
+contributing to this repository, you agree that your contribution is licensed
+under the BSD 3-Clause License unless a file explicitly states otherwise.
+
+All commits must include a Developer Certificate of Origin sign-off. This
+certifies that you wrote the contribution or otherwise have the right to submit
+it under this project's license. Add the sign-off with:
+
+```bash
+git commit -s
+```
+
+The resulting commit message must contain a line like:
+
+```text
+Signed-off-by: Your Name <you@example.com>
+```
+
+Do not submit code, data, generated artifacts, or documentation copied from
+another project unless the license permits that reuse and you clearly identify
+the source and license in the pull request. Do not submit employer-owned or
+third-party work unless you are authorized to contribute it under BSD 3-Clause.
+
+The DCO text is available at <https://developercertificate.org/>.
+
 ## Development Setup
 
 Create an isolated Python environment, then install the project in editable
@@ -59,6 +86,8 @@ Each pull request should include:
 - A clear summary of what changed and why.
 - Tests for behavior changes and bug fixes.
 - Documentation updates when user-facing behavior changes.
+- DCO-signed commits confirming the contribution can be submitted under
+  BSD 3-Clause.
 - No unrelated formatting, generated files, or broad refactors.
 - Passing CI.
 
