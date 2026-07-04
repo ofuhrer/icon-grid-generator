@@ -69,3 +69,7 @@ grid.to_netcdf("grid.nc")
 ```
 
 NetCDF export requires the `netcdf` optional extra.
+
+## Release History
+
+See [CHANGELOG.md](CHANGELOG.md).

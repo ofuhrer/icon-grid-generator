@@ -131,6 +131,18 @@ def test_global_grid_spec_derives_frequency_and_name():
     assert generate_grid(spec).dims["cell"] == 5120
 
 
+def test_global_grid_spec_normalizes_or_rejects_custom_name():
+    spec = GlobalGridSpec(root=2, bisections=3, name=" r2b3 ")
+
+    assert spec.name == "R02B03"
+    assert gg.grid_uuid(spec.name) == gg.grid_uuid("R02B03")
+
+    with pytest.raises(ValueError, match="name must match"):
+        GlobalGridSpec(root=2, bisections=3, name="R01B00")
+    with pytest.raises(ValueError, match="form RxxByy"):
+        GlobalGridSpec(root=1, bisections=0, name="custom")
+
+
 def test_global_grid_spec_rejects_inconsistent_frequency():
     with pytest.raises(ValueError, match=r"frequency must equal root \* 2\*\*bisections"):
         GlobalGridSpec(root=2, bisections=3, frequency=15)
@@ -209,6 +221,28 @@ def test_generate_grid_accepts_all_public_grid_specs():
 def test_generate_grid_rejects_invalid_options(options, error, message):
     with pytest.raises(error, match=message):
         generate_grid("R01B00", options=options)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"sphere_radius": 0.0}, ValueError, "sphere_radius must be positive"),
+        ({"sphere_radius": math.nan}, ValueError, "sphere_radius must be finite"),
+        ({"sphere_radius": math.inf}, ValueError, "sphere_radius must be finite"),
+        ({"rotation_axis": (1.0, 0.0)}, ValueError, "rotation_axis"),
+        ({"rotation_axis": (math.nan, 0.0, 0.0)}, ValueError, "rotation_axis"),
+        (
+            {"rotation_axis": (0.0, 0.0, 0.0), "rotation_angle_degrees": 0.05},
+            ValueError,
+            "rotation_axis",
+        ),
+        ({"rotation_angle_degrees": math.inf}, ValueError, "rotation_angle_degrees"),
+        ({"rotation_angle_degrees": "0.05"}, TypeError, "rotation_angle_degrees"),
+    ],
+)
+def test_grid_uuid_rejects_invalid_numeric_inputs(kwargs, error, message):
+    with pytest.raises(error, match=message):
+        gg.grid_uuid("R01B00", **kwargs)
 
 
 @pytest.mark.parametrize(

@@ -283,12 +283,21 @@ class GlobalGridSpec:
         if self.frequency not in (0, expected_frequency):
             raise ValueError("global grid frequency must equal root * 2**bisections")
         object.__setattr__(self, "frequency", expected_frequency)
-        if not self.name:
-            object.__setattr__(
-                self,
-                "name",
-                f"R{self.root:02d}B{self.bisections:02d}",
-            )
+        canonical_name = f"R{self.root:02d}B{self.bisections:02d}"
+        if not isinstance(self.name, str):
+            raise TypeError("global grid name must be a string")
+        if not self.name.strip():
+            object.__setattr__(self, "name", canonical_name)
+            return
+
+        match = GRID_NAME_RE.fullmatch(self.name.strip())
+        if match is None:
+            raise ValueError("global grid name must have the form RxxByy")
+        name_root = int(match.group(1))
+        name_bisections = int(match.group(2))
+        if name_root != self.root or name_bisections != self.bisections:
+            raise ValueError("global grid name must match root and bisections")
+        object.__setattr__(self, "name", canonical_name)
 
     @property
     def expected_cells(self) -> int:
@@ -389,12 +398,6 @@ class LimitedAreaGridSpec:
     @property
     def expected_vertices(self) -> int:
         return 0
-
-
-# Backward-compatible module aliases. The package-level public API exports the
-# symmetric *GridSpec names above.
-IconGridSpec = GlobalGridSpec
-LimitedAreaSpec = LimitedAreaGridSpec
 
 
 @dataclass(frozen=True)
@@ -1773,10 +1776,13 @@ def grid_uuid(
     rotation_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
     rotation_angle_degrees: float = 0.0,
 ) -> str:
+    canonical_sphere_radius = finite_float_option("sphere_radius", sphere_radius)
+    if canonical_sphere_radius <= 0.0:
+        raise ValueError("sphere_radius must be positive")
     payload = {
         "generator": "grid_generator",
         "grid": parse_grid_spec(grid_name).name,
-        "sphere_radius": _canonical_float(sphere_radius),
+        "sphere_radius": _canonical_float(canonical_sphere_radius),
         "rotation": _canonical_rotation(rotation_axis, rotation_angle_degrees),
     }
     return str(
@@ -1791,11 +1797,16 @@ def _canonical_rotation(
     axis: tuple[float, float, float],
     angle_degrees: float,
 ) -> dict[str, Any]:
-    angle = _canonical_float(angle_degrees)
+    angle = _canonical_float(finite_float_option("rotation_angle_degrees", angle_degrees))
+    normalized_axis = np.asarray(axis, dtype=np.float64)
+    if normalized_axis.shape != (3,) or not np.all(np.isfinite(normalized_axis)):
+        raise ValueError("rotation_axis must contain three finite numbers")
+    axis_norm = np.linalg.norm(normalized_axis)
+    if axis_norm == 0.0 and angle != 0.0:
+        raise ValueError("rotation_axis must be non-zero when rotation_angle_degrees is non-zero")
     if angle == 0.0:
         return {"axis": [0.0, 0.0, 0.0], "angle_degrees": 0.0}
-    normalized_axis = np.asarray(axis, dtype=np.float64)
-    normalized_axis = normalized_axis / np.linalg.norm(normalized_axis)
+    normalized_axis = normalized_axis / axis_norm
     return {
         "axis": [_canonical_float(value) for value in normalized_axis],
         "angle_degrees": angle,
