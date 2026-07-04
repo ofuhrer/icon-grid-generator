@@ -1,18 +1,38 @@
 from __future__ import annotations
 
 import builtins
+from dataclasses import replace
 import math
 import numpy as np
 import pytest
 
 import grid_generator as grid_generator_package
 from grid_generator import (
+    ChannelGridSpec,
+    CircleRegion,
+    CutGridSpec,
+    DiffusionOptions,
+    LonLatBoxRegion,
     IconGrid,
     IconGridOptions,
     GlobalGridSpec,
     LimitedAreaGridSpec,
+    OptimizationOptions,
+    OrientedRectangleRegion,
+    ParallelogramGridSpec,
+    PolygonRegion,
+    RaggedOrthogonalGridSpec,
+    StretchedTorusGridSpec,
     TorusGridSpec,
+    cell_divergence,
+    cell_vorticity_fnorm,
+    check_grid,
+    cut_grid,
+    diffuse_grid,
     generate_grid,
+    grid_statistics,
+    optimize_grid,
+    triangle_properties,
 )
 from grid_generator import grid_generator as gg
 from grid_generator._geometry import SphericalIcosahedralGeometry
@@ -25,12 +45,34 @@ from grid_generator.grid_generator import parse_grid_spec
 
 def test_public_package_exports_only_supported_grid_api():
     assert grid_generator_package.__all__ == [
+        "ChannelGridSpec",
+        "CircleRegion",
+        "CutGridSpec",
+        "DiffusionOptions",
+        "GridCheckResult",
+        "GridStatistics",
         "IconGrid",
         "IconGridOptions",
         "GlobalGridSpec",
         "LimitedAreaGridSpec",
+        "LonLatBoxRegion",
+        "OptimizationOptions",
+        "OrientedRectangleRegion",
+        "ParallelogramGridSpec",
+        "PolygonRegion",
+        "RaggedOrthogonalGridSpec",
+        "StretchedTorusGridSpec",
+        "TriangleProperties",
         "TorusGridSpec",
+        "cell_divergence",
+        "cell_vorticity_fnorm",
+        "check_grid",
+        "cut_grid",
+        "diffuse_grid",
         "generate_grid",
+        "grid_statistics",
+        "optimize_grid",
+        "triangle_properties",
     ]
     assert "write_icon_grid" not in grid_generator_package.__all__
     assert not hasattr(grid_generator_package, "write_icon_grid")
@@ -45,6 +87,9 @@ def test_public_package_exports_only_supported_grid_api():
     assert grid_generator_package.LimitedAreaGridSpec is LimitedAreaGridSpec
     assert grid_generator_package.TorusGridSpec is TorusGridSpec
     assert grid_generator_package.generate_grid is generate_grid
+    assert grid_generator_package.ChannelGridSpec is ChannelGridSpec
+    assert grid_generator_package.optimize_grid is optimize_grid
+    assert grid_generator_package.check_grid is check_grid
 
 
 def assert_unit_sphere(points):
@@ -105,6 +150,27 @@ def spherical_triangle_areas_lhuilier(vertices, cells, sphere_radius):
         * np.tan(0.5 * (semiperimeter - side_c))
     )
     return 4.0 * np.arctan(tan_quarter_excess) * sphere_radius**2
+
+
+def geometric_dual_areas_from_cell_centers(grid, sphere_radius):
+    centers = unit_rows(grid.cell_center_xyz)
+    dual_areas = np.zeros(grid.dims["vertex"], dtype=np.float64)
+    for vertex_index, ordered_cells in enumerate(grid.icon_connectivity["v2c"]):
+        cell_indices = ordered_cells[ordered_cells > 0] - 1
+        if cell_indices.size < 3:
+            continue
+        polygon = centers[cell_indices]
+        fan_cells = np.array(
+            [[0, index, index + 1] for index in range(1, polygon.shape[0] - 1)],
+            dtype=np.int32,
+        )
+        dual_areas[vertex_index] = spherical_triangle_areas_lhuilier(
+            polygon,
+            fan_cells,
+            sphere_radius,
+        ).sum()
+    dual_areas *= grid.geometry["cell_area"].sum() / dual_areas.sum()
+    return dual_areas
 
 
 def test_parse_grid_spec_normalizes_supported_names_and_expected_counts():
@@ -176,6 +242,10 @@ def test_parse_grid_spec_negative_bisection_defensive_guard(monkeypatch):
 def test_generate_grid_accepts_all_public_grid_specs():
     global_grid = generate_grid(parse_grid_spec("R01B00"))
     torus_grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=1.0))
+    stretched_grid = generate_grid(StretchedTorusGridSpec(nx=4, ny=3, edge_length=1.0))
+    channel_grid = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
+    parallelogram_grid = generate_grid(ParallelogramGridSpec(nx=3, ny=2, edge_length=1.0))
+    ragged_grid = generate_grid(RaggedOrthogonalGridSpec(nx=3, ny=2, dx=1.0, dy=1.0))
     limited_area_grid = generate_grid(
         LimitedAreaGridSpec(
             "R02B01",
@@ -190,6 +260,10 @@ def test_generate_grid_accepts_all_public_grid_specs():
 
     assert global_grid.metadata["grid_geometry"] == 1
     assert torus_grid.metadata["grid_geometry"] == 2
+    assert stretched_grid.metadata["grid_geometry"] == 2
+    assert channel_grid.metadata["grid_geometry"] == 2
+    assert parallelogram_grid.metadata["grid_geometry"] == 2
+    assert ragged_grid.metadata["grid_geometry"] == 2
     assert limited_area_grid.metadata["grid_geometry"] == 3
 
 
@@ -414,6 +488,7 @@ def test_torus_grid_has_periodic_topology_and_planar_metrics():
     assert np.allclose(grid.geometry["edge_length"], edge_length)
     assert np.allclose(grid.geometry["cell_area"], np.sqrt(3.0) * 0.25 * edge_length**2)
     assert np.allclose(grid.geometry["dual_edge_length"], edge_length / np.sqrt(3.0))
+    assert np.allclose(grid.geometry["edgequad_area"], 0.0)
     assert np.all(np.isfinite(grid.vertices))
     assert np.all(np.isfinite(grid.cell_center_xyz))
     assert np.all(np.isfinite(grid.edge_center_xyz))
@@ -435,6 +510,44 @@ def test_torus_netcdf_export_contains_complete_periodic_grid(tmp_path):
         assert np.array_equal(dataset.variables["adjacent_cell_of_edge"][:], grid.edge_cells.T + 1)
         assert np.allclose(dataset.variables["cell_area"][:], grid.geometry["cell_area"])
         assert np.allclose(dataset.variables["edge_length"][:], grid.geometry["edge_length"])
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        StretchedTorusGridSpec(nx=4, ny=3, edge_length=2.0, stretch_x=1.5, stretch_y=0.75),
+        ChannelGridSpec(nx=3, ny=2, edge_length=2.0),
+        ParallelogramGridSpec(nx=3, ny=2, edge_length=2.0, shear=0.35),
+        RaggedOrthogonalGridSpec(nx=3, ny=2, dx=2.0, dy=1.0, raggedness=0.1),
+    ],
+)
+def test_planar_grid_variants_have_consistent_triangular_topology(spec):
+    grid = generate_grid(spec)
+
+    assert grid.dims["cell"] == spec.expected_cells
+    assert grid.dims["vertex"] == spec.expected_vertices
+    assert grid.dims["edge"] == spec.expected_edges
+    assert grid.metadata["grid_geometry"] == 2
+    assert grid.cells.shape == (spec.expected_cells, 3)
+    assert grid.edges.shape == (spec.expected_edges, 2)
+    assert np.all((0 <= grid.cells) & (grid.cells < grid.dims["vertex"]))
+    assert np.all((0 <= grid.cell_edges) & (grid.cell_edges < grid.dims["edge"]))
+    assert np.all(np.isfinite(grid.vertices))
+    assert np.all(grid.geometry["cell_area"] > 0.0)
+    assert np.all(grid.geometry["edge_length"] > 0.0)
+    if getattr(spec, "periodic", False):
+        assert np.all(grid.edge_cells >= 0)
+        assert grid.metadata["periodic"] == 1
+    else:
+        assert np.any(grid.edge_cells[:, 1] < 0)
+        assert grid.metadata["periodic"] == 0
+
+
+def test_stretched_torus_rejects_degenerate_periodic_dimensions():
+    with pytest.raises(ValueError, match="greater than or equal to 3"):
+        StretchedTorusGridSpec(nx=2, ny=3, edge_length=1.0)
+    with pytest.raises(ValueError, match="greater than or equal to 3"):
+        StretchedTorusGridSpec(nx=3, ny=2, edge_length=1.0)
 
 
 def test_limited_area_grid_is_compact_boundary_ordered_and_parent_linked():
@@ -468,6 +581,123 @@ def test_limited_area_grid_is_compact_boundary_ordered_and_parent_linked():
     assert np.min(grid.refinement["refin_c_ctrl"]) == 1
     assert np.all(np.isfinite(grid.geometry["cell_area"]))
     assert np.all(np.isfinite(grid.geometry["edge_length"]))
+
+
+def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
+    parent = generate_grid("R02B01", options={"max_cells": None})
+    keep_spec = CutGridSpec(
+        regions=(
+            CircleRegion(lon=0.0, lat=0.0, radius_degrees=35.0),
+            LonLatBoxRegion(lon_min=-20.0, lon_max=20.0, lat_min=-15.0, lat_max=15.0),
+            OrientedRectangleRegion(
+                center_lon=0.0,
+                center_lat=0.0,
+                width_degrees=30.0,
+                height_degrees=20.0,
+                angle_degrees=20.0,
+            ),
+            PolygonRegion(points=((-35.0, -5.0), (0.0, 30.0), (35.0, -5.0))),
+        ),
+        boundary_depth=1,
+        smoothing_depth=2,
+        name="CUT_KEEP",
+    )
+    cut = cut_grid(parent, keep_spec)
+    remove = cut_grid(
+        parent,
+        CutGridSpec(
+            regions=(CircleRegion(lon=0.0, lat=0.0, radius_degrees=35.0),),
+            mode="remove",
+        ),
+    )
+
+    assert cut.name == "CUT_KEEP"
+    assert cut.dims["cell"] > 0
+    assert cut.dims["cell"] < parent.dims["cell"]
+    assert remove.dims["cell"] > 0
+    assert remove.dims["cell"] < parent.dims["cell"]
+    assert cut.metadata["source_grid_name"] == parent.name
+    assert cut.metadata["boundary_depth_index"] == 1
+    assert cut.metadata["smoothing_depth"] == 2
+    assert np.any(cut.edge_cells[:, 1] < 0)
+    assert np.all(cut.refinement["parent_cell_index"] > 0)
+    assert np.all(cut.refinement["smooth_c_ctrl"] == 2)
+
+
+def test_cut_grid_boundary_expansion_ignores_open_grid_missing_neighbors():
+    parent = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
+    cut = cut_grid(
+        parent,
+        CutGridSpec(
+            regions=(LonLatBoxRegion(lon_min=-180.0, lon_max=-60.0, lat_min=-90.0, lat_max=-60.0),),
+            boundary_depth=1,
+        ),
+    )
+
+    assert np.all(cut.refinement["parent_cell_index"] > 0)
+    assert np.all(cut.refinement["parent_cell_index"] <= parent.dims["cell"])
+
+
+def test_cut_grid_spec_rejects_unsupported_region_objects():
+    with pytest.raises(TypeError, match="supported region spec"):
+        CutGridSpec(regions=("not-a-region",))
+
+
+def test_geometry_optimization_and_diffusion_preserve_topology_and_boundaries():
+    grid = generate_grid(ChannelGridSpec(nx=4, ny=3, edge_length=1.0))
+    boundary_vertices = np.unique(grid.edges[grid.edge_cells[:, 1] < 0])
+    optimized = optimize_grid(grid, OptimizationOptions(iterations=2, relaxation=0.2))
+    diffused = diffuse_grid(grid, DiffusionOptions(iterations=2, diffusion_constant=0.05))
+
+    for transformed in [optimized, diffused]:
+        assert transformed is not grid
+        assert np.array_equal(transformed.cells, grid.cells)
+        assert np.array_equal(transformed.edges, grid.edges)
+        assert np.array_equal(transformed.edge_cells, grid.edge_cells)
+        assert np.allclose(transformed.vertices[boundary_vertices], grid.vertices[boundary_vertices])
+        assert np.all(np.isfinite(transformed.geometry["cell_area"]))
+        assert np.all(transformed.geometry["cell_area"] > 0.0)
+
+
+def test_geometry_postprocessing_rejects_invalid_option_objects():
+    grid = generate_grid(ChannelGridSpec(nx=2, ny=2, edge_length=1.0))
+
+    with pytest.raises(TypeError, match="OptimizationOptions"):
+        optimize_grid(grid, options=0)
+    with pytest.raises(TypeError, match="DiffusionOptions"):
+        diffuse_grid(grid, options=0)
+
+
+def test_diagnostics_and_postprocessing_core_operators():
+    grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=2.0))
+    check = check_grid(grid)
+    stats = grid_statistics(grid)
+    props = triangle_properties(grid)
+
+    assert check.ok
+    assert not check.errors
+    assert stats.cells == grid.dims["cell"]
+    assert stats.boundary_edges == 0
+    assert props.area.shape == (grid.dims["cell"],)
+    assert props.edge_lengths.shape == (grid.dims["cell"], 3)
+    assert np.all(props.min_angle_degrees > 0.0)
+    assert np.allclose(cell_divergence(grid, np.zeros(grid.dims["edge"])), 0.0)
+
+    vertex_vorticity = np.arange(grid.dims["vertex"], dtype=np.float64)
+    fnorm = cell_vorticity_fnorm(grid, vertex_vorticity, coriolis=2.0)
+    assert np.allclose(fnorm, vertex_vorticity[grid.cells].mean(axis=1) / 2.0)
+
+
+def test_check_grid_reports_reversed_duplicate_edges():
+    grid = generate_grid(ChannelGridSpec(nx=2, ny=2, edge_length=1.0))
+    edges = grid.edges.copy()
+    edges[1] = edges[0][::-1]
+    broken = replace(grid, edges=edges)
+
+    check = check_grid(broken)
+
+    assert not check.ok
+    assert "edges contain duplicate vertex pairs" in check.errors
 
 
 def test_cell_centers_are_true_spherical_circumcenters():
@@ -805,19 +1035,13 @@ def test_geometry_metric_fields_are_positive_scaled_and_conservative():
     )
 
 
-def test_dual_areas_are_one_third_of_incident_cell_areas():
-    grid = generate_grid("R02B02", options={"sphere_radius": 3.0})
-    expected_dual_area = np.zeros(grid.dims["vertex"], dtype=np.float64)
-
-    for cell_index, vertices in enumerate(grid.cells):
-        expected_dual_area[vertices] += grid.geometry["cell_area"][cell_index] / 3.0
+def test_dual_areas_are_geometric_dual_cell_areas():
+    sphere_radius = 3.0
+    grid = generate_grid("R02B02", options={"sphere_radius": sphere_radius})
+    expected_dual_area = geometric_dual_areas_from_cell_centers(grid, sphere_radius)
 
     assert np.allclose(grid.geometry["dual_area"], expected_dual_area)
-    for vertex_index, incident_cells in enumerate(grid.connectivity["cells_of_vertex"]):
-        active_cells = incident_cells[incident_cells >= 0]
-        assert grid.geometry["dual_area"][vertex_index] == pytest.approx(
-            np.sum(grid.geometry["cell_area"][active_cells]) / 3.0
-        )
+    assert np.allclose(grid.geometry["dual_area"].sum(), grid.geometry["cell_area"].sum())
 
 
 def test_edge_vectors_are_tangent_and_match_local_zonal_meridional_components():
@@ -941,9 +1165,7 @@ def test_metric_fields_match_independent_spherical_recomputation():
         )
     ) * sphere_radius
     expected_cell_areas = spherical_triangle_areas_lhuilier(grid.vertices, grid.cells, sphere_radius)
-    expected_dual_area = np.zeros(grid.dims["vertex"])
-    for cell_index, cell in enumerate(grid.cells):
-        expected_dual_area[cell] += expected_cell_areas[cell_index] / 3.0
+    expected_dual_area = geometric_dual_areas_from_cell_centers(grid, sphere_radius)
 
     assert np.allclose(grid.geometry["cell_area"], expected_cell_areas)
     assert np.allclose(grid.geometry["edge_length"], expected_edge_lengths)

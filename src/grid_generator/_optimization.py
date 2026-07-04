@@ -1,0 +1,276 @@
+"""Geometry optimization and diffusion transforms."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+from ._validation import finite_float_option
+
+
+@dataclass(frozen=True)
+class OptimizationOptions:
+    """Options for deterministic Laplacian/spring grid smoothing."""
+
+    iterations: int = 10
+    relaxation: float = 0.25
+    fixed_boundary: bool = True
+    target_edge_length: float | None = None
+
+    def __post_init__(self) -> None:
+        _validate_iterations("iterations", self.iterations)
+        relaxation = finite_float_option("relaxation", self.relaxation)
+        if not 0.0 <= relaxation <= 1.0:
+            raise ValueError("relaxation must be in [0, 1]")
+        if not isinstance(self.fixed_boundary, bool):
+            raise TypeError("fixed_boundary must be a boolean")
+        if self.target_edge_length is not None:
+            target = finite_float_option("target_edge_length", self.target_edge_length)
+            if target <= 0.0:
+                raise ValueError("target_edge_length must be positive")
+            object.__setattr__(self, "target_edge_length", target)
+        object.__setattr__(self, "relaxation", relaxation)
+
+
+@dataclass(frozen=True)
+class DiffusionOptions:
+    """Options for explicit geometry diffusion over vertex adjacency."""
+
+    iterations: int = 10
+    diffusion_constant: float = 0.1
+    dt: float = 1.0
+    neighbor_weight: float = 1.0
+    fixed_boundary: bool = True
+
+    def __post_init__(self) -> None:
+        _validate_iterations("iterations", self.iterations)
+        diffusion_constant = finite_float_option("diffusion_constant", self.diffusion_constant)
+        dt = finite_float_option("dt", self.dt)
+        neighbor_weight = finite_float_option("neighbor_weight", self.neighbor_weight)
+        if diffusion_constant < 0.0:
+            raise ValueError("diffusion_constant must be non-negative")
+        if dt < 0.0:
+            raise ValueError("dt must be non-negative")
+        if neighbor_weight <= 0.0:
+            raise ValueError("neighbor_weight must be positive")
+        if not isinstance(self.fixed_boundary, bool):
+            raise TypeError("fixed_boundary must be a boolean")
+        object.__setattr__(self, "diffusion_constant", diffusion_constant)
+        object.__setattr__(self, "dt", dt)
+        object.__setattr__(self, "neighbor_weight", neighbor_weight)
+
+
+def optimize_grid(grid: Any, options: OptimizationOptions | None = None) -> Any:
+    """Return a geometry-optimized copy of `grid` with unchanged topology."""
+    opts = OptimizationOptions() if options is None else options
+    if not isinstance(opts, OptimizationOptions):
+        raise TypeError("options must be an OptimizationOptions instance or None")
+    vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
+    adjacency = _vertex_adjacency(grid)
+    movable = _movable_vertices(grid, opts.fixed_boundary)
+    for _ in range(opts.iterations):
+        updated = vertices.copy()
+        for vertex, neighbors in enumerate(adjacency):
+            if not movable[vertex] or not neighbors:
+                continue
+            target = _spring_target(vertices, vertex, neighbors, opts.target_edge_length)
+            updated[vertex] = vertices[vertex] + opts.relaxation * (target - vertices[vertex])
+        vertices = _project_vertices(grid, updated)
+    return _rebuild_grid(grid, vertices)
+
+
+def diffuse_grid(grid: Any, options: DiffusionOptions | None = None) -> Any:
+    """Return a geometry-diffused copy of `grid` with unchanged topology."""
+    opts = DiffusionOptions() if options is None else options
+    if not isinstance(opts, DiffusionOptions):
+        raise TypeError("options must be a DiffusionOptions instance or None")
+    vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
+    adjacency = _vertex_adjacency(grid)
+    movable = _movable_vertices(grid, opts.fixed_boundary)
+    step = opts.diffusion_constant * opts.dt
+    for _ in range(opts.iterations):
+        updated = vertices.copy()
+        for vertex, neighbors in enumerate(adjacency):
+            if not movable[vertex] or not neighbors:
+                continue
+            average = vertices[neighbors].mean(axis=0)
+            updated[vertex] = vertices[vertex] + step * opts.neighbor_weight * (
+                average - vertices[vertex]
+            )
+        vertices = _project_vertices(grid, updated)
+    return _rebuild_grid(grid, vertices)
+
+
+def _validate_iterations(name: str, value: Any) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be a non-negative integer")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+
+
+def _vertex_adjacency(grid: Any) -> list[list[int]]:
+    adjacency: list[set[int]] = [set() for _ in range(grid.dims["vertex"])]
+    for v0, v1 in grid.edges:
+        adjacency[int(v0)].add(int(v1))
+        adjacency[int(v1)].add(int(v0))
+    return [sorted(neighbors) for neighbors in adjacency]
+
+
+def _movable_vertices(grid: Any, fixed_boundary: bool) -> np.ndarray:
+    movable = np.ones(grid.dims["vertex"], dtype=bool)
+    if not fixed_boundary:
+        return movable
+    boundary_edges = grid.edge_cells[:, 1] < 0
+    if np.any(boundary_edges):
+        movable[np.unique(grid.edges[boundary_edges])] = False
+    return movable
+
+
+def _spring_target(
+    vertices: np.ndarray,
+    vertex: int,
+    neighbors: list[int],
+    target_edge_length: float | None,
+) -> np.ndarray:
+    if target_edge_length is None:
+        return vertices[neighbors].mean(axis=0)
+    directions = vertices[neighbors] - vertices[vertex]
+    lengths = np.linalg.norm(directions, axis=1)
+    active = lengths > 0.0
+    if not np.any(active):
+        return vertices[vertex]
+    desired = vertices[vertex] + directions[active] / lengths[active, np.newaxis] * target_edge_length
+    return desired.mean(axis=0)
+
+
+def _project_vertices(grid: Any, vertices: np.ndarray) -> np.ndarray:
+    projected = vertices.copy()
+    if grid.metadata.get("grid_geometry") == 2:
+        projected[:, 2] = grid.vertices[:, 2]
+        if grid.metadata.get("periodic"):
+            projected[:, 0] %= grid.spec.domain_length
+            projected[:, 1] %= grid.spec.domain_height
+        return projected
+
+    radius = grid.options.radius
+    norms = np.linalg.norm(projected, axis=1)
+    if np.any(norms == 0.0):
+        raise RuntimeError("optimization produced a zero-length vertex")
+    return projected / norms[:, np.newaxis] * radius
+
+
+def _rebuild_grid(grid: Any, vertices: np.ndarray) -> Any:
+    if grid.metadata.get("grid_geometry") == 2:
+        from ._planar import rebuild_planar_grid
+
+        return rebuild_planar_grid(grid, vertices)
+    return _rebuild_spherical_grid(grid, vertices)
+
+
+def _rebuild_spherical_grid(grid: Any, vertices: np.ndarray) -> Any:
+    from . import grid_generator as gg
+
+    cell_center_xyz = gg._cell_centers(vertices, grid.cells, grid.options.radius)
+    vertex_lon, vertex_lat = gg._lon_lat(vertices)
+    lon, lat = gg._lon_lat(cell_center_xyz)
+    edge_center_xyz = gg._edge_centers(vertices, grid.edges, grid.options.radius)
+    edge_lon, edge_lat = gg._lon_lat(edge_center_xyz)
+    geometry = _spherical_metrics(grid, vertices, cell_center_xyz, edge_center_xyz)
+    metadata = dict(grid.metadata)
+    metadata.update(gg._metadata(grid.spec, grid.options, geometry))
+    return gg.IconGrid(
+        spec=grid.spec,
+        options=grid.options,
+        vertices=vertices,
+        cells=grid.cells.copy(),
+        lon=lon,
+        lat=lat,
+        vertex_lon=vertex_lon,
+        vertex_lat=vertex_lat,
+        cell_center_xyz=cell_center_xyz,
+        cell_vertex_lon=vertex_lon[grid.cells],
+        cell_vertex_lat=vertex_lat[grid.cells],
+        edges=grid.edges.copy(),
+        cell_edges=grid.cell_edges.copy(),
+        edge_cells=grid.edge_cells.copy(),
+        edge_center_xyz=edge_center_xyz,
+        edge_lon=edge_lon,
+        edge_lat=edge_lat,
+        icon_connectivity={name: value.copy() for name, value in grid.icon_connectivity.items()},
+        connectivity={name: value.copy() for name, value in grid.connectivity.items()},
+        neighbor_tables={name: value.copy() for name, value in grid.neighbor_tables.items()},
+        geometry=geometry,
+        refinement={name: value.copy() for name, value in grid.refinement.items()},
+        metadata=metadata,
+    )
+
+
+def _spherical_metrics(
+    grid: Any,
+    vertices: np.ndarray,
+    cell_center_xyz: np.ndarray,
+    edge_center_xyz: np.ndarray,
+) -> dict[str, np.ndarray]:
+    from . import grid_generator as gg
+
+    if np.all(grid.edge_cells >= 0):
+        return gg._geometry_fields(
+            vertices,
+            grid.cells,
+            cell_center_xyz,
+            grid.edges,
+            grid.edge_cells,
+            edge_center_xyz,
+            grid.icon_connectivity,
+            grid.options.sphere_radius,
+        )
+    cell_areas = gg._cell_areas(vertices, grid.cells, grid.options.sphere_radius)
+    edge_lengths = gg._edge_lengths(vertices, grid.edges, grid.options.sphere_radius)
+    edge_cell_distance = _open_edge_cell_distances(
+        cell_center_xyz,
+        grid.edge_cells,
+        edge_center_xyz,
+        grid.options.sphere_radius,
+    )
+    dual_edge_lengths = edge_cell_distance.sum(axis=1)
+    boundary = grid.edge_cells[:, 1] < 0
+    dual_edge_lengths[boundary] = 2.0 * edge_cell_distance[boundary, 0]
+    edge_system_orientation = np.ones(grid.edges.shape[0], dtype=np.int32)
+    normals = gg._edge_normal_fields(vertices, grid.edges, edge_center_xyz, edge_system_orientation)
+    return {
+        "cell_area": cell_areas,
+        "dual_area": gg._dual_areas(vertices.shape[0], grid.cells, cell_areas),
+        "edge_length": edge_lengths,
+        "dual_edge_length": dual_edge_lengths,
+        "edge_cell_distance": edge_cell_distance,
+        "edge_vert_distance": np.column_stack((edge_lengths * 0.5, edge_lengths * 0.5)),
+        "orientation_of_normal": grid.icon_connectivity["orientation_of_normal"],
+        "edge_system_orientation": edge_system_orientation,
+        "edge_orientation": grid.icon_connectivity["edge_orientation"],
+        "edgequad_area": 0.5 * edge_lengths * dual_edge_lengths,
+        **normals,
+    }
+
+
+def _open_edge_cell_distances(
+    cell_center_xyz: np.ndarray,
+    edge_cells: np.ndarray,
+    edge_center_xyz: np.ndarray,
+    sphere_radius: float,
+) -> np.ndarray:
+    from . import grid_generator as gg
+
+    edge_centers = gg._normalize_rows(edge_center_xyz)
+    cell_centers = gg._normalize_rows(cell_center_xyz)
+    distances = np.zeros((edge_cells.shape[0], 2), dtype=np.float64)
+    for edge_index, adjacent in enumerate(edge_cells):
+        for side in range(2):
+            cell = int(adjacent[side])
+            if cell < 0:
+                distances[edge_index, side] = distances[edge_index, 0]
+                continue
+            dot = float(np.dot(cell_centers[cell], edge_centers[edge_index]))
+            distances[edge_index, side] = np.arccos(np.clip(dot, -1.0, 1.0)) * sphere_radius
+    return distances

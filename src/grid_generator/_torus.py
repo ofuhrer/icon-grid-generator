@@ -150,7 +150,7 @@ class PlanarTorusMetricsBuilder:
             "orientation_of_normal": topology.icon_connectivity["orientation_of_normal"],
             "edge_system_orientation": np.ones(n_edges, dtype=np.int32),
             "edge_orientation": topology.icon_connectivity["edge_orientation"],
-            "edgequad_area": np.full(n_edges, 0.5 * edge_length * dual_edge_length),
+            "edgequad_area": np.zeros(n_edges, dtype=np.float64),
             "edge_primal_normal_cartesian": primal_normal,
             "edge_dual_normal_cartesian": dual_normal,
             "zonal_normal_primal_edge": primal_normal[:, 0],

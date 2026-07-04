@@ -7,7 +7,7 @@ write a compact ICON grid NetCDF file.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import getpass
 from math import sqrt
@@ -25,6 +25,12 @@ from ._io import IconNetcdfWriter
 from ._limited_area import LimitedAreaExtractor
 from ._metrics import SphericalMetricsBuilder
 from ._ordering import FortranOrderingBuilder
+from ._planar import (
+    PlanarRefinementBuilder,
+    PlanarTriangularGeometry,
+    PlanarTriangularMetricsBuilder,
+    PlanarTriangularTopologyBuilder,
+)
 from ._refinement import GlobalRefinementBuilder
 from ._topology import GlobalTopologyBuilder
 from ._torus import (
@@ -354,6 +360,165 @@ class TorusGridSpec:
 
 
 @dataclass(frozen=True)
+class StretchedTorusGridSpec:
+    """Planar triangular torus grid with anisotropic coordinate stretching."""
+
+    nx: int
+    ny: int
+    edge_length: float
+    stretch_x: float = 1.0
+    stretch_y: float = 1.0
+    name: str = ""
+
+    periodic: bool = field(default=True, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_planar_counts("stretched torus", self.nx, self.ny, minimum=3)
+        edge_length = _finite_float_option("edge_length", self.edge_length)
+        stretch_x = _finite_float_option("stretch_x", self.stretch_x)
+        stretch_y = _finite_float_option("stretch_y", self.stretch_y)
+        if edge_length <= 0.0:
+            raise ValueError("edge_length must be positive")
+        if stretch_x <= 0.0 or stretch_y <= 0.0:
+            raise ValueError("stretch factors must be positive")
+        object.__setattr__(self, "edge_length", edge_length)
+        object.__setattr__(self, "stretch_x", stretch_x)
+        object.__setattr__(self, "stretch_y", stretch_y)
+        if not self.name:
+            object.__setattr__(self, "name", f"STRETCHED_TORUS{self.nx}x{self.ny}")
+
+    @property
+    def expected_cells(self) -> int:
+        return 2 * self.nx * self.ny
+
+    @property
+    def expected_edges(self) -> int:
+        return 3 * self.nx * self.ny
+
+    @property
+    def expected_vertices(self) -> int:
+        return self.nx * self.ny
+
+    @property
+    def domain_length(self) -> float:
+        return self.nx * self.edge_length * self.stretch_x
+
+    @property
+    def domain_height(self) -> float:
+        return self.ny * np.sqrt(3.0) * 0.5 * self.edge_length * self.stretch_y
+
+
+@dataclass(frozen=True)
+class ChannelGridSpec:
+    """Open planar triangular channel grid."""
+
+    nx: int
+    ny: int
+    edge_length: float
+    name: str = ""
+
+    periodic: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_planar_counts("channel", self.nx, self.ny)
+        edge_length = _finite_float_option("edge_length", self.edge_length)
+        if edge_length <= 0.0:
+            raise ValueError("edge_length must be positive")
+        object.__setattr__(self, "edge_length", edge_length)
+        if not self.name:
+            object.__setattr__(self, "name", f"CHANNEL{self.nx}x{self.ny}")
+
+    @property
+    def expected_cells(self) -> int:
+        return 2 * self.nx * self.ny
+
+    @property
+    def expected_edges(self) -> int:
+        return 3 * self.nx * self.ny + self.nx + self.ny
+
+    @property
+    def expected_vertices(self) -> int:
+        return (self.nx + 1) * (self.ny + 1)
+
+
+@dataclass(frozen=True)
+class ParallelogramGridSpec:
+    """Open planar triangular parallelogram grid."""
+
+    nx: int
+    ny: int
+    edge_length: float
+    shear: float = 0.25
+    name: str = ""
+
+    periodic: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_planar_counts("parallelogram", self.nx, self.ny)
+        edge_length = _finite_float_option("edge_length", self.edge_length)
+        shear = _finite_float_option("shear", self.shear)
+        if edge_length <= 0.0:
+            raise ValueError("edge_length must be positive")
+        object.__setattr__(self, "edge_length", edge_length)
+        object.__setattr__(self, "shear", shear)
+        if not self.name:
+            object.__setattr__(self, "name", f"PARALLELOGRAM{self.nx}x{self.ny}")
+
+    @property
+    def expected_cells(self) -> int:
+        return 2 * self.nx * self.ny
+
+    @property
+    def expected_edges(self) -> int:
+        return 3 * self.nx * self.ny + self.nx + self.ny
+
+    @property
+    def expected_vertices(self) -> int:
+        return (self.nx + 1) * (self.ny + 1)
+
+
+@dataclass(frozen=True)
+class RaggedOrthogonalGridSpec:
+    """Open triangular grid on a deterministic ragged orthogonal lattice."""
+
+    nx: int
+    ny: int
+    dx: float
+    dy: float
+    raggedness: float = 0.15
+    name: str = ""
+
+    periodic: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_planar_counts("ragged orthogonal", self.nx, self.ny)
+        dx = _finite_float_option("dx", self.dx)
+        dy = _finite_float_option("dy", self.dy)
+        raggedness = _finite_float_option("raggedness", self.raggedness)
+        if dx <= 0.0 or dy <= 0.0:
+            raise ValueError("dx and dy must be positive")
+        if not 0.0 <= raggedness < 0.45:
+            raise ValueError("raggedness must be in [0, 0.45)")
+        object.__setattr__(self, "dx", dx)
+        object.__setattr__(self, "dy", dy)
+        object.__setattr__(self, "raggedness", raggedness)
+        if not self.name:
+            object.__setattr__(self, "name", f"RAGGED_ORTHOGONAL{self.nx}x{self.ny}")
+
+    @property
+    def expected_cells(self) -> int:
+        return 2 * self.nx * self.ny
+
+    @property
+    def expected_edges(self) -> int:
+        return 3 * self.nx * self.ny + self.nx + self.ny
+
+    @property
+    def expected_vertices(self) -> int:
+        return (self.nx + 1) * (self.ny + 1)
+
+
+@dataclass(frozen=True)
 class LimitedAreaGridSpec:
     """Limited-area grid extracted from a generated global parent grid."""
 
@@ -401,6 +566,155 @@ class LimitedAreaGridSpec:
 
 
 @dataclass(frozen=True)
+class LonLatBoxRegion:
+    """Select cells whose centers fall in a longitude/latitude box."""
+
+    lon_min: float
+    lon_max: float
+    lat_min: float
+    lat_max: float
+
+    def __post_init__(self) -> None:
+        lon_min = _finite_float_option("lon_min", self.lon_min)
+        lon_max = _finite_float_option("lon_max", self.lon_max)
+        lat_min = _finite_float_option("lat_min", self.lat_min)
+        lat_max = _finite_float_option("lat_max", self.lat_max)
+        if not -180.0 <= lon_min <= 180.0 or not -180.0 <= lon_max <= 180.0:
+            raise ValueError("longitude bounds must be within [-180, 180]")
+        if not -90.0 <= lat_min <= 90.0 or not -90.0 <= lat_max <= 90.0:
+            raise ValueError("latitude bounds must be within [-90, 90]")
+        if lat_min > lat_max:
+            raise ValueError("lat_min must be less than or equal to lat_max")
+        object.__setattr__(self, "lon_min", lon_min)
+        object.__setattr__(self, "lon_max", lon_max)
+        object.__setattr__(self, "lat_min", lat_min)
+        object.__setattr__(self, "lat_max", lat_max)
+
+
+@dataclass(frozen=True)
+class CircleRegion:
+    """Select cells within an angular radius of a lon/lat center."""
+
+    lon: float
+    lat: float
+    radius_degrees: float
+
+    def __post_init__(self) -> None:
+        lon = _finite_float_option("lon", self.lon)
+        lat = _finite_float_option("lat", self.lat)
+        radius = _finite_float_option("radius_degrees", self.radius_degrees)
+        if not -180.0 <= lon <= 180.0:
+            raise ValueError("lon must be within [-180, 180]")
+        if not -90.0 <= lat <= 90.0:
+            raise ValueError("lat must be within [-90, 90]")
+        if radius <= 0.0:
+            raise ValueError("radius_degrees must be positive")
+        object.__setattr__(self, "lon", lon)
+        object.__setattr__(self, "lat", lat)
+        object.__setattr__(self, "radius_degrees", radius)
+
+
+@dataclass(frozen=True)
+class OrientedRectangleRegion:
+    """Select cells inside a rotated local lon/lat rectangle."""
+
+    center_lon: float
+    center_lat: float
+    width_degrees: float
+    height_degrees: float
+    angle_degrees: float = 0.0
+
+    def __post_init__(self) -> None:
+        center_lon = _finite_float_option("center_lon", self.center_lon)
+        center_lat = _finite_float_option("center_lat", self.center_lat)
+        width = _finite_float_option("width_degrees", self.width_degrees)
+        height = _finite_float_option("height_degrees", self.height_degrees)
+        angle = _finite_float_option("angle_degrees", self.angle_degrees)
+        if not -180.0 <= center_lon <= 180.0:
+            raise ValueError("center_lon must be within [-180, 180]")
+        if not -90.0 <= center_lat <= 90.0:
+            raise ValueError("center_lat must be within [-90, 90]")
+        if width <= 0.0 or height <= 0.0:
+            raise ValueError("rectangle width and height must be positive")
+        object.__setattr__(self, "center_lon", center_lon)
+        object.__setattr__(self, "center_lat", center_lat)
+        object.__setattr__(self, "width_degrees", width)
+        object.__setattr__(self, "height_degrees", height)
+        object.__setattr__(self, "angle_degrees", angle)
+
+
+@dataclass(frozen=True)
+class PolygonRegion:
+    """Select cells inside a lon/lat polygon."""
+
+    points: tuple[tuple[float, float], ...]
+
+    def __post_init__(self) -> None:
+        points = tuple(tuple(point) for point in self.points)
+        if len(points) < 3:
+            raise ValueError("polygon requires at least three points")
+        normalized: list[tuple[float, float]] = []
+        for lon, lat in points:
+            lon = _finite_float_option("polygon longitude", lon)
+            lat = _finite_float_option("polygon latitude", lat)
+            if not -180.0 <= lon <= 180.0 or not -90.0 <= lat <= 90.0:
+                raise ValueError("polygon points must be valid lon/lat pairs")
+            normalized.append((lon, lat))
+        object.__setattr__(self, "points", tuple(normalized))
+
+
+@dataclass(frozen=True)
+class CutGridSpec:
+    """Selection options for extracting a cut grid from an existing grid."""
+
+    regions: tuple[LonLatBoxRegion | CircleRegion | OrientedRectangleRegion | PolygonRegion, ...]
+    mode: str = "keep"
+    boundary_depth: int = 0
+    smoothing_depth: int = 0
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        regions = tuple(self.regions)
+        if not regions:
+            raise ValueError("cut grid spec requires at least one region")
+        supported_region_types = (
+            LonLatBoxRegion,
+            CircleRegion,
+            OrientedRectangleRegion,
+            PolygonRegion,
+        )
+        if not all(isinstance(region, supported_region_types) for region in regions):
+            raise TypeError("cut grid regions must be supported region spec instances")
+        if self.mode not in {"keep", "remove"}:
+            raise ValueError("cut mode must be 'keep' or 'remove'")
+        for name, value in {
+            "boundary_depth": self.boundary_depth,
+            "smoothing_depth": self.smoothing_depth,
+        }.items():
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"{name} must be a non-negative integer")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        object.__setattr__(self, "regions", regions)
+        if not self.name:
+            object.__setattr__(self, "name", "CUT_GRID")
+
+
+_PLANAR_GRID_SPEC_TYPES = (
+    StretchedTorusGridSpec,
+    ChannelGridSpec,
+    ParallelogramGridSpec,
+    RaggedOrthogonalGridSpec,
+)
+_SUPPORTED_GRID_SPEC_TYPES = (
+    GlobalGridSpec,
+    TorusGridSpec,
+    LimitedAreaGridSpec,
+    *_PLANAR_GRID_SPEC_TYPES,
+)
+
+
+@dataclass(frozen=True)
 class IconGridOptions:
     """Options for pure Python ICON grid generation."""
 
@@ -415,7 +729,7 @@ class IconGridOptions:
 class IconGrid:
     """ICON grid geometry, topology, metrics, and NetCDF export support."""
 
-    spec: GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec
+    spec: Any
     options: IconGridOptions
     vertices: np.ndarray
     cells: np.ndarray
@@ -533,18 +847,25 @@ class IconGrid:
 
 
 def generate_grid(
-    spec: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
+    spec: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any,
     options: IconGridOptions | Mapping[str, Any] | None = None,
 ) -> IconGrid:
     """Create a pure Python ICON geodesic, torus, or limited-area grid."""
     grid_spec = parse_grid_spec(spec) if isinstance(spec, str) else spec
-    if not isinstance(grid_spec, (GlobalGridSpec, TorusGridSpec, LimitedAreaGridSpec)):
+    if not isinstance(grid_spec, _SUPPORTED_GRID_SPEC_TYPES):
         raise TypeError("spec must be an RxxByy string or a supported grid spec")
     resolved_options = _resolve_options(options)
     _validate_options(grid_spec, resolved_options)
 
     if isinstance(grid_spec, TorusGridSpec):
         return _generate_torus_grid(grid_spec, resolved_options)
+    if isinstance(grid_spec, StretchedTorusGridSpec) and np.isclose(
+        [grid_spec.stretch_x, grid_spec.stretch_y],
+        [1.0, 1.0],
+    ).all():
+        return _generate_torus_grid(grid_spec, resolved_options)
+    if isinstance(grid_spec, _PLANAR_GRID_SPEC_TYPES):
+        return _generate_planar_grid(grid_spec, resolved_options)
     if isinstance(grid_spec, LimitedAreaGridSpec):
         return _generate_limited_area_grid(grid_spec, resolved_options)
     return _generate_grid(grid_spec, resolved_options)
@@ -559,6 +880,13 @@ def _validate_options(
 
 def _finite_float_option(name: str, value: Any) -> float:
     return finite_float_option(name, value)
+
+
+def _validate_planar_counts(name: str, nx: Any, ny: Any, *, minimum: int = 1) -> None:
+    if not isinstance(nx, int) or isinstance(nx, bool) or nx < minimum:
+        raise ValueError(f"{name} nx must be an integer greater than or equal to {minimum}")
+    if not isinstance(ny, int) or isinstance(ny, bool) or ny < minimum:
+        raise ValueError(f"{name} ny must be an integer greater than or equal to {minimum}")
 
 
 def _write_icon_grid(
@@ -608,10 +936,10 @@ def _require_complete_icon_grid(grid: IconGrid) -> None:
 
 
 def parse_grid_spec(
-    grid_name: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
-) -> GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec:
+    grid_name: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any,
+) -> GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any:
     """Parse and normalize an RxxByy grid name."""
-    if isinstance(grid_name, (GlobalGridSpec, TorusGridSpec, LimitedAreaGridSpec)):
+    if isinstance(grid_name, _SUPPORTED_GRID_SPEC_TYPES):
         return grid_name
     if not isinstance(grid_name, str):
         raise TypeError("grid_name must be a string such as 'R02B03'")
@@ -717,12 +1045,90 @@ def _generate_torus_grid(spec: TorusGridSpec, options: IconGridOptions) -> IconG
     )
 
 
+def _generate_planar_grid(spec: Any, options: IconGridOptions) -> IconGrid:
+    geometry = PlanarTriangularGeometry().build(spec, options)
+    topology = PlanarTriangularTopologyBuilder().build(spec, geometry)
+    if topology.edges.shape[0] != spec.expected_edges:
+        raise RuntimeError(
+            f"generated {topology.edges.shape[0]} edges, expected {spec.expected_edges}"
+        )
+    metrics = PlanarTriangularMetricsBuilder().build(spec, geometry, topology)
+    refinement = PlanarRefinementBuilder().build(geometry, topology)
+    metadata = _metadata(spec, options, metrics.fields)
+    return IconGrid(
+        spec=spec,
+        options=options,
+        vertices=geometry.vertices,
+        cells=geometry.cells,
+        lon=geometry.lon,
+        lat=geometry.lat,
+        vertex_lon=geometry.vertex_lon,
+        vertex_lat=geometry.vertex_lat,
+        cell_center_xyz=geometry.cell_center_xyz,
+        cell_vertex_lon=geometry.cell_vertex_lon,
+        cell_vertex_lat=geometry.cell_vertex_lat,
+        edges=topology.edges,
+        cell_edges=topology.cell_edges,
+        edge_cells=topology.edge_cells,
+        edge_center_xyz=topology.edge_center_xyz,
+        edge_lon=topology.edge_lon,
+        edge_lat=topology.edge_lat,
+        icon_connectivity=topology.icon_connectivity,
+        connectivity=topology.connectivity,
+        neighbor_tables=topology.neighbor_tables,
+        geometry=metrics.fields,
+        refinement=refinement.fields,
+        metadata=metadata,
+    )
+
+
 def _generate_limited_area_grid(spec: LimitedAreaGridSpec, options: IconGridOptions) -> IconGrid:
     geometry, topology, metrics, refinement = LimitedAreaExtractor().build(spec, options)
     metadata = _metadata(spec, options, metrics.fields)
     return IconGrid(
         spec=spec,
         options=options,
+        vertices=geometry.vertices,
+        cells=geometry.cells,
+        lon=geometry.lon,
+        lat=geometry.lat,
+        vertex_lon=geometry.vertex_lon,
+        vertex_lat=geometry.vertex_lat,
+        cell_center_xyz=geometry.cell_center_xyz,
+        cell_vertex_lon=geometry.cell_vertex_lon,
+        cell_vertex_lat=geometry.cell_vertex_lat,
+        edges=topology.edges,
+        cell_edges=topology.cell_edges,
+        edge_cells=topology.edge_cells,
+        edge_center_xyz=topology.edge_center_xyz,
+        edge_lon=topology.edge_lon,
+        edge_lat=topology.edge_lat,
+        icon_connectivity=topology.icon_connectivity,
+        connectivity=topology.connectivity,
+        neighbor_tables=topology.neighbor_tables,
+        geometry=metrics.fields,
+        refinement=refinement.fields,
+        metadata=metadata,
+    )
+
+
+def cut_grid(grid: IconGrid, spec: CutGridSpec) -> IconGrid:
+    """Extract an open cut grid from an existing in-memory grid."""
+    from ._limited_area import cut_existing_grid
+
+    geometry, topology, metrics, refinement = cut_existing_grid(grid, spec)
+    metadata = _metadata(spec, grid.options, metrics.fields)
+    metadata.update(
+        {
+            "source_grid_name": grid.name,
+            "boundary_depth_index": spec.boundary_depth,
+            "smoothing_depth": spec.smoothing_depth,
+            "cut_mode": spec.mode,
+        }
+    )
+    return IconGrid(
+        spec=spec,
+        options=grid.options,
         vertices=geometry.vertices,
         cells=geometry.cells,
         lon=geometry.lon,
@@ -1439,7 +1845,14 @@ def _geometry_fields(
     )
     return {
         "cell_area": cell_areas,
-        "dual_area": _dual_areas(vertices.shape[0], cells, cell_areas),
+        "dual_area": _dual_areas(
+            vertices.shape[0],
+            cells,
+            cell_areas,
+            cell_center_xyz,
+            icon_connectivity["v2c"],
+            sphere_radius,
+        ),
         "edge_length": edge_lengths,
         "dual_edge_length": dual_edge_lengths,
         "edge_cell_distance": edge_cell_distance,
@@ -1663,7 +2076,7 @@ def _parent_edge_fields(
 
 
 def _metadata(
-    spec: GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
+    spec: Any,
     options: IconGridOptions,
     geometry: dict[str, np.ndarray] | None = None,
 ) -> dict[str, Any]:
@@ -1689,6 +2102,7 @@ def _metadata(
         metadata.update(
             {
                 "grid_geometry": 2,
+                "periodic": 1,
                 "crs_name": "Planar torus",
                 "grid_mapping_name": "cartesian",
                 "domain_length": spec.domain_length,
@@ -1698,6 +2112,26 @@ def _metadata(
                 "torus_edge_length": spec.edge_length,
             }
         )
+    elif isinstance(spec, _PLANAR_GRID_SPEC_TYPES):
+        metadata.update(
+            {
+                "grid_geometry": 2,
+                "periodic": int(getattr(spec, "periodic", False)),
+                "crs_name": "Planar",
+                "grid_mapping_name": "cartesian",
+                "planar_grid_type": spec.__class__.__name__,
+                "planar_nx": spec.nx,
+                "planar_ny": spec.ny,
+            }
+        )
+        if hasattr(spec, "domain_length"):
+            metadata["domain_length"] = spec.domain_length
+            metadata["domain_height"] = spec.domain_height
+        elif hasattr(spec, "edge_length"):
+            metadata["planar_edge_length"] = spec.edge_length
+        else:
+            metadata["planar_dx"] = spec.dx
+            metadata["planar_dy"] = spec.dy
     elif isinstance(spec, LimitedAreaGridSpec):
         metadata.update(
             {
@@ -1708,6 +2142,17 @@ def _metadata(
                 "lat_min": spec.lat_min,
                 "lat_max": spec.lat_max,
                 "boundary_depth_index": spec.boundary_depth,
+            }
+        )
+    elif isinstance(spec, CutGridSpec):
+        metadata.update(
+            {
+                "grid_geometry": 3,
+                "grid_mapping_name": "cartesian",
+                "cut_mode": spec.mode,
+                "boundary_depth_index": spec.boundary_depth,
+                "smoothing_depth": spec.smoothing_depth,
+                "cut_region_count": len(spec.regions),
             }
         )
     if geometry:
@@ -1723,7 +2168,7 @@ def _metadata(
 
 
 def _spec_uuid(
-    spec: GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec,
+    spec: Any,
     options: IconGridOptions,
 ) -> str:
     if isinstance(spec, GlobalGridSpec):
@@ -1747,7 +2192,7 @@ def _spec_uuid(
                 "edge_length": _canonical_float(spec.edge_length),
             }
         )
-    else:
+    elif isinstance(spec, LimitedAreaGridSpec):
         payload.update(
             {
                 "family": "limited_area",
@@ -1761,12 +2206,44 @@ def _spec_uuid(
                 "boundary_depth": spec.boundary_depth,
             }
         )
+    elif isinstance(spec, _PLANAR_GRID_SPEC_TYPES):
+        spec_payload = asdict(spec)
+        spec_payload.pop("periodic", None)
+        payload.update(
+            {
+                "family": "planar",
+                "kind": spec.__class__.__name__,
+                "parameters": _canonicalize_payload(spec_payload),
+            }
+        )
+    elif isinstance(spec, CutGridSpec):
+        payload.update(
+            {
+                "family": "cut",
+                "mode": spec.mode,
+                "boundary_depth": spec.boundary_depth,
+                "smoothing_depth": spec.smoothing_depth,
+                "regions": _canonicalize_payload(asdict(spec)["regions"]),
+            }
+        )
+    else:
+        payload.update({"family": "unknown"})
     return str(
         uuid.uuid5(
             uuid.NAMESPACE_URL,
             json.dumps(payload, sort_keys=True, separators=(",", ":")),
         )
     )
+
+
+def _canonicalize_payload(value: Any) -> Any:
+    if isinstance(value, float):
+        return _canonical_float(value)
+    if isinstance(value, dict):
+        return {key: _canonicalize_payload(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_payload(item) for item in value]
+    return value
 
 
 def grid_uuid(
@@ -1871,11 +2348,61 @@ def _dual_areas(
     n_vertices: int,
     cells: np.ndarray,
     cell_areas: np.ndarray,
+    cell_center_xyz: np.ndarray | None = None,
+    ordered_cells_of_vertex: np.ndarray | None = None,
+    sphere_radius: float | None = None,
 ) -> np.ndarray:
+    if cell_center_xyz is not None and ordered_cells_of_vertex is not None and sphere_radius is not None:
+        dual = _geometric_dual_areas(n_vertices, cell_center_xyz, ordered_cells_of_vertex, sphere_radius)
+        dual_sum = float(dual.sum())
+        if dual_sum > 0.0:
+            dual *= float(cell_areas.sum()) / dual_sum
+        return dual
+
     dual = np.zeros(n_vertices, dtype=np.float64)
     for cell_index, cell in enumerate(cells):
         dual[cell] += cell_areas[cell_index] / 3.0
     return dual
+
+
+def _geometric_dual_areas(
+    n_vertices: int,
+    cell_center_xyz: np.ndarray,
+    ordered_cells_of_vertex: np.ndarray,
+    sphere_radius: float,
+) -> np.ndarray:
+    unit_centers = _normalize_rows(cell_center_xyz)
+    dual = np.zeros(n_vertices, dtype=np.float64)
+    for vertex_index in range(n_vertices):
+        cell_indices = ordered_cells_of_vertex[vertex_index]
+        cell_indices = cell_indices[cell_indices > 0] - 1
+        if cell_indices.size < 3:
+            continue
+        polygon = unit_centers[cell_indices]
+        area = 0.0
+        anchor = polygon[0]
+        for index in range(1, polygon.shape[0] - 1):
+            area += _spherical_triangle_area(anchor, polygon[index], polygon[index + 1])
+        dual[vertex_index] = area * sphere_radius**2
+    return dual
+
+
+def _spherical_triangle_area(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    normal_ab = _normalize_rows(np.cross(a[np.newaxis, :], b[np.newaxis, :]))[0]
+    normal_ac = _normalize_rows(np.cross(a[np.newaxis, :], c[np.newaxis, :]))[0]
+    normal_ba = _normalize_rows(np.cross(b[np.newaxis, :], a[np.newaxis, :]))[0]
+    normal_bc = _normalize_rows(np.cross(b[np.newaxis, :], c[np.newaxis, :]))[0]
+    normal_ca = _normalize_rows(np.cross(c[np.newaxis, :], a[np.newaxis, :]))[0]
+    normal_cb = _normalize_rows(np.cross(c[np.newaxis, :], b[np.newaxis, :]))[0]
+    angles = np.array(
+        [
+            np.arccos(np.clip(np.dot(normal_ab, normal_ac), -1.0, 1.0)),
+            np.arccos(np.clip(np.dot(normal_ba, normal_bc), -1.0, 1.0)),
+            np.arccos(np.clip(np.dot(normal_ca, normal_cb), -1.0, 1.0)),
+        ],
+        dtype=np.float64,
+    )
+    return float(angles.sum() - np.pi)
 
 
 def _edge_lengths(vertices: np.ndarray, edges: np.ndarray, sphere_radius: float) -> np.ndarray:

@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use ICON Grid Generator in published work, please cite it using this metadata."
+title: "ICON Grid Generator"
+version: "0.1.0"
+date-released: "2026-07-04"
+type: software
+license: BSD-3-Clause
+authors:
+  - family-names: Fuhrer
+    given-names: Oliver
+    affiliation: MeteoSwiss
+repository-code: "https://github.com/ofuhrer/icon-grid-generator"
+url: "https://github.com/ofuhrer/icon-grid-generator"
+keywords:
+  - ICON
+  - triangular grids
+  - geodesic grids
+  - NetCDF
+  - atmospheric science

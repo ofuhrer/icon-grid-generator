@@ -31,11 +31,15 @@ dependencies = [
 ]
 
 [project.urls]
+Changelog = "https://github.com/ofuhrer/icon-grid-generator/blob/main/CHANGELOG.md"
+Documentation = "https://ofuhrer.github.io/icon-grid-generator/"
 Homepage = "https://github.com/ofuhrer/icon-grid-generator"
-Repository = "https://github.com/ofuhrer/icon-grid-generator"
 Issues = "https://github.com/ofuhrer/icon-grid-generator/issues"
+Repository = "https://github.com/ofuhrer/icon-grid-generator"
+Source = "https://github.com/ofuhrer/icon-grid-generator"
 
 [project.optional-dependencies]
+docs = ["mkdocs", "mkdocs-material"]
 netcdf = ["netCDF4"]
 xarray = ["xarray"]
 test = ["pytest", "ruff", "netCDF4", "xarray"]

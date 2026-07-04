@@ -1,0 +1,33 @@
+# ICON Grid Generator
+
+ICON Grid Generator is a pure Python package for creating ICON-style triangular
+grids without depending on ICON model runtimes or stencil frameworks.
+
+![Global ICON grid resolutions](assets/global-icon-grid-series.png)
+
+## What It Provides
+
+- Global spherical RxxByy grids, including compact string parsing such as
+  `R02B03`.
+- Planar torus and open planar triangular grids for local experiments.
+- Limited-area grids extracted from generated global parent grids.
+- ICON-style NetCDF export when the optional `netCDF4` dependency is installed.
+- In-memory geometry, topology, connectivity, metric, and refinement arrays for
+  plotting, diagnostics, and downstream conversion.
+
+## Quick Example
+
+```python
+from grid_generator import generate_grid
+
+grid = generate_grid("R02B03")
+print(grid.dims)
+print(grid.metadata["mean_edge_length"])
+```
+
+## Project Links
+
+- [Examples](examples.md)
+- [API overview](api.md)
+- [Changelog](../CHANGELOG.md)
+- [Citation metadata](../CITATION.cff)

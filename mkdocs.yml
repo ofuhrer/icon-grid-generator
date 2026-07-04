@@ -1,0 +1,14 @@
+site_name: ICON Grid Generator
+site_description: Pure Python generation of ICON-style triangular grids.
+site_url: https://ofuhrer.github.io/icon-grid-generator/
+repo_url: https://github.com/ofuhrer/icon-grid-generator
+repo_name: ofuhrer/icon-grid-generator
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Examples: examples.md
+  - API: api.md
+  - Repository Metadata: repository-metadata.md

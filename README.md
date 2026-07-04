@@ -1,10 +1,27 @@
 # ICON Grid Generator
 
+[![Tests](https://github.com/ofuhrer/icon-grid-generator/actions/workflows/test.yml/badge.svg)](https://github.com/ofuhrer/icon-grid-generator/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/icon-grid-generator.svg)](https://pypi.org/project/icon-grid-generator/)
+[![Python](https://img.shields.io/pypi/pyversions/icon-grid-generator.svg)](https://pypi.org/project/icon-grid-generator/)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+
 Pure Python generation of ICON-style triangular grids.
 
-The package provides spherical RxxByy grids, planar doubly periodic torus grids,
-limited-area grids extracted from generated global grids, and optional NetCDF
-export. It has no dependency on model runtimes or stencil frameworks.
+![Global ICON grid resolutions](docs/assets/global-icon-grid-series.png)
+
+ICON Grid Generator creates spherical RxxByy grids, planar triangular grids,
+limited-area extracts, and ICON-style NetCDF files without depending on ICON
+model runtimes or stencil frameworks.
+
+## Features
+
+- Generate global spherical ICON grids from compact names such as `R02B03`.
+- Generate planar doubly periodic torus grids and additional planar variants.
+- Extract limited-area grids from generated global parent grids.
+- Export ICON-style NetCDF grid files with optional `netCDF4` support.
+- Inspect in-memory topology, connectivity, geometry, refinement, and metadata
+  arrays for plotting or downstream conversion.
+- Run lightweight diagnostics and deterministic geometry postprocessing.
 
 ## Installation
 
@@ -20,15 +37,29 @@ Install optional NetCDF and xarray support with:
 python -m pip install -e ".[netcdf,xarray]"
 ```
 
-## Usage
+Install development dependencies with:
+
+```bash
+python -m pip install -e ".[test,docs]"
+```
+
+## Quick Start
 
 Generate a global spherical grid:
 
 ```python
-from grid_generator import GlobalGridSpec, generate_grid
+from grid_generator import generate_grid
 
-grid = generate_grid(GlobalGridSpec(root=2, bisections=3))
+grid = generate_grid("R02B03")
+print(grid.name)
 print(grid.dims)
+```
+
+Example output:
+
+```python
+R02B03
+{'cell': 1280, 'vertex': 642, 'edge': 1920}
 ```
 
 Generate a planar torus grid:
@@ -38,6 +69,7 @@ from grid_generator import TorusGridSpec, generate_grid
 
 grid = generate_grid(TorusGridSpec(nx=32, ny=16, edge_length=1_000.0))
 print(grid.metadata["grid_geometry"])
+print(grid.metadata["domain_length"])
 ```
 
 Extract a limited-area grid from a generated global parent:
@@ -54,12 +86,7 @@ spec = LimitedAreaGridSpec(
     boundary_depth=2,
 )
 grid = generate_grid(spec, options={"max_cells": None})
-```
-
-For global grids, the compact RxxByy string remains available as shorthand:
-
-```python
-grid = generate_grid("R02B03")
+print(grid.dims)
 ```
 
 Write an ICON-style NetCDF file:
@@ -70,6 +97,45 @@ grid.to_netcdf("grid.nc")
 
 NetCDF export requires the `netcdf` optional extra.
 
+## Documentation
+
+The minimal documentation lives in [docs](docs):
+
+- [Overview](docs/index.md)
+- [Examples](docs/examples.md)
+- [API overview](docs/api.md)
+- [Repository metadata](docs/repository-metadata.md)
+
+To preview the docs locally:
+
+```bash
+mkdocs serve
+```
+
+## Development
+
+Run the checks used by CI:
+
+```bash
+python -m ruff check .
+python -m pytest
+```
+
+The package is laid out as a standalone Python project. If this directory is
+split out of a larger checkout, keep `.github/`, `docs/`, `CITATION.cff`,
+`CHANGELOG.md`, `LICENSE`, `README.md`, `mkdocs.yml`, `pyproject.toml`, `src/`,
+and `tests/` at the new repository root.
+
+## Citation
+
+If you use ICON Grid Generator in published work, cite it using
+[CITATION.cff](CITATION.cff). For research releases, connect the public GitHub
+repository to Zenodo before creating a GitHub Release so a DOI can be minted.
+
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+ICON Grid Generator is distributed under the [BSD 3-Clause License](LICENSE).

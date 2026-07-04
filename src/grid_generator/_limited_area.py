@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from math import cos, radians
 from typing import Any
 
 import numpy as np
@@ -29,6 +30,27 @@ class LimitedAreaExtractor:
         return geometry, topology, metrics, refinement
 
 
+def cut_existing_grid(parent: Any, spec: Any) -> tuple[GeometryData, TopologyData, MetricsData, RefinementData]:
+    """Cut an existing grid using region predicates."""
+    selected = _selected_cells_from_regions(parent, spec)
+    if spec.mode == "remove":
+        selected = set(range(parent.dims["cell"])) - selected
+    selected = _expand_cells(parent, selected, spec.boundary_depth)
+    if not selected:
+        raise ValueError("cut grid selection does not contain any cells")
+    ordered_parent_cells = _order_cells_by_boundary(parent, selected)
+    geometry = _compact_geometry(parent, ordered_parent_cells)
+    topology = _open_topology(parent, geometry, ordered_parent_cells, parent.options)
+    metrics = _limited_metrics(parent, geometry, topology, parent.options.sphere_radius)
+    refinement = _limited_refinement(parent, geometry, topology, ordered_parent_cells)
+    refinement.fields["smooth_c_ctrl"] = np.full(
+        geometry.cells.shape[0],
+        spec.smoothing_depth,
+        dtype=np.int32,
+    )
+    return geometry, topology, metrics, refinement
+
+
 def _selected_cells(parent: Any, spec: Any) -> set[int]:
     lon_min = spec.lon_min
     lon_max = spec.lon_max
@@ -40,13 +62,94 @@ def _selected_cells(parent: Any, spec: Any) -> set[int]:
     return set(np.nonzero(lon_mask & lat_mask)[0].astype(int))
 
 
+def _selected_cells_from_regions(parent: Any, spec: Any) -> set[int]:
+    mask = np.zeros(parent.dims["cell"], dtype=bool)
+    for region in spec.regions:
+        mask |= _region_mask(parent.lon, parent.lat, region)
+    return set(np.nonzero(mask)[0].astype(int))
+
+
+def _region_mask(lon: np.ndarray, lat: np.ndarray, region: Any) -> np.ndarray:
+    name = region.__class__.__name__
+    if name == "LonLatBoxRegion":
+        if region.lon_min <= region.lon_max:
+            lon_mask = (lon >= region.lon_min) & (lon <= region.lon_max)
+        else:
+            lon_mask = (lon >= region.lon_min) | (lon <= region.lon_max)
+        return lon_mask & (lat >= region.lat_min) & (lat <= region.lat_max)
+    if name == "CircleRegion":
+        return _angular_distance_degrees(lon, lat, region.lon, region.lat) <= region.radius_degrees
+    if name == "OrientedRectangleRegion":
+        dx = _wrapped_lon_delta(lon - region.center_lon) * cos(radians(region.center_lat))
+        dy = lat - region.center_lat
+        angle = radians(region.angle_degrees)
+        x_rot = dx * np.cos(angle) + dy * np.sin(angle)
+        y_rot = -dx * np.sin(angle) + dy * np.cos(angle)
+        return (
+            (np.abs(x_rot) <= 0.5 * region.width_degrees)
+            & (np.abs(y_rot) <= 0.5 * region.height_degrees)
+        )
+    if name == "PolygonRegion":
+        return _polygon_mask(lon, lat, region.points)
+    raise TypeError(f"unsupported cut region {name}")
+
+
+def _angular_distance_degrees(
+    lon: np.ndarray,
+    lat: np.ndarray,
+    center_lon: float,
+    center_lat: float,
+) -> np.ndarray:
+    lon1 = np.radians(lon)
+    lat1 = np.radians(lat)
+    lon2 = radians(center_lon)
+    lat2 = radians(center_lat)
+    dlon = lon1 - lon2
+    dlat = lat1 - lat2
+    a = np.sin(0.5 * dlat) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(0.5 * dlon) ** 2
+    return np.degrees(2.0 * np.arcsin(np.clip(np.sqrt(a), 0.0, 1.0)))
+
+
+def _polygon_mask(
+    lon: np.ndarray,
+    lat: np.ndarray,
+    points: tuple[tuple[float, float], ...],
+) -> np.ndarray:
+    reference = points[0][0]
+    x = _wrapped_lon_delta(lon - reference)
+    y = lat
+    polygon = np.asarray(
+        [(_wrapped_lon_delta(point_lon - reference), point_lat) for point_lon, point_lat in points],
+        dtype=np.float64,
+    )
+    inside = np.zeros(lon.shape, dtype=bool)
+    j = polygon.shape[0] - 1
+    for i in range(polygon.shape[0]):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        crosses = ((yi > y) != (yj > y)) & (
+            x < (xj - xi) * (y - yi) / ((yj - yi) or 1.0e-30) + xi
+        )
+        inside ^= crosses
+        j = i
+    return inside
+
+
+def _wrapped_lon_delta(delta: np.ndarray | float) -> np.ndarray | float:
+    return (np.asarray(delta) + 180.0) % 360.0 - 180.0
+
+
 def _expand_cells(parent: Any, selected: set[int], depth: int) -> set[int]:
-    expanded = set(selected)
-    frontier = set(selected)
+    n_cells = parent.dims["cell"]
+    expanded = {cell for cell in selected if 0 <= cell < n_cells}
+    frontier = set(expanded)
     for _ in range(depth):
         next_frontier: set[int] = set()
         for cell in frontier:
-            next_frontier.update(int(neighbor) for neighbor in parent.icon_connectivity["c2c"][cell])
+            for neighbor in parent.icon_connectivity["c2c"][cell]:
+                neighbor = int(neighbor)
+                if 0 <= neighbor < n_cells:
+                    next_frontier.add(neighbor)
         next_frontier -= expanded
         expanded.update(next_frontier)
         frontier = next_frontier
