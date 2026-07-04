@@ -37,7 +37,7 @@ from grid_generator import (
 from grid_generator import grid_generator as gg
 from grid_generator._geometry import SphericalIcosahedralGeometry
 from grid_generator._metrics import SphericalMetricsBuilder
-from grid_generator._ordering import FortranOrderingBuilder
+from grid_generator._ordering import IconOrderingBuilder
 from grid_generator._refinement import GlobalRefinementBuilder
 from grid_generator._topology import GlobalTopologyBuilder
 from grid_generator.grid_generator import parse_grid_spec
@@ -401,7 +401,7 @@ def test_internal_generation_pipeline_matches_public_facade():
     grid = generate_grid(spec.name, options=options)
 
     geometry = SphericalIcosahedralGeometry().build(spec, options)
-    geometry = FortranOrderingBuilder().order_spherical_bisection(spec, options, geometry)
+    geometry = IconOrderingBuilder().order_spherical_bisection(spec, options, geometry)
     topology = GlobalTopologyBuilder().build(spec, options, geometry)
     metrics = SphericalMetricsBuilder().build(options, geometry, topology)
     refinement = GlobalRefinementBuilder().build(spec, options, geometry, topology)
@@ -457,7 +457,7 @@ def test_icon_grid_rotation_defaults_to_unrotated_and_can_be_enabled():
     ("grid_name", "parent_grid_name"),
     [("R01B02", "R01B01"), ("R02B03", "R02B02")],
 )
-def test_spherical_bisection_cells_follow_fortran_child_ordering(
+def test_spherical_bisection_cells_follow_icon_child_ordering(
     grid_name,
     parent_grid_name,
 ):

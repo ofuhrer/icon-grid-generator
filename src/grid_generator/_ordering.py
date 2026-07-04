@@ -17,8 +17,8 @@ CHILD_ORDER = {
 }
 
 
-class FortranOrderingBuilder:
-    """Apply deterministic child ordering used by ICON's Fortran grid generator."""
+class IconOrderingBuilder:
+    """Apply deterministic ICON child ordering."""
 
     def order_spherical_bisection(self, spec: Any, options: Any, geometry: GeometryData) -> GeometryData:
         if getattr(spec, "bisections", 0) == 0:

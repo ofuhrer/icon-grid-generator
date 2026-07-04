@@ -24,7 +24,7 @@ from ._geometry import SphericalIcosahedralGeometry
 from ._io import IconNetcdfWriter
 from ._limited_area import LimitedAreaExtractor
 from ._metrics import SphericalMetricsBuilder
-from ._ordering import FortranOrderingBuilder
+from ._ordering import IconOrderingBuilder
 from ._planar import (
     PlanarRefinementBuilder,
     PlanarTriangularGeometry,
@@ -979,7 +979,7 @@ def _resolve_options(options: IconGridOptions | Mapping[str, Any] | None) -> Ico
 
 def _generate_grid(spec: GlobalGridSpec, options: IconGridOptions) -> IconGrid:
     geometry = SphericalIcosahedralGeometry().build(spec, options)
-    geometry = FortranOrderingBuilder().order_spherical_bisection(spec, options, geometry)
+    geometry = IconOrderingBuilder().order_spherical_bisection(spec, options, geometry)
     topology = GlobalTopologyBuilder().build(spec, options, geometry)
     metrics = SphericalMetricsBuilder().build(options, geometry, topology)
     refinement = GlobalRefinementBuilder().build(spec, options, geometry, topology)
