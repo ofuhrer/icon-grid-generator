@@ -29,5 +29,5 @@ print(grid.metadata["mean_edge_length"])
 
 - [Examples](examples.md)
 - [API overview](api.md)
-- [Changelog](../CHANGELOG.md)
-- [Citation metadata](../CITATION.cff)
+- [Changelog](https://github.com/ofuhrer/icon-grid-generator/blob/main/CHANGELOG.md)
+- [Citation metadata](https://github.com/ofuhrer/icon-grid-generator/blob/main/CITATION.cff)
