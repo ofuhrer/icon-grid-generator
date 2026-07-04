@@ -418,9 +418,13 @@ class ChannelGridSpec:
     name: str = ""
 
     periodic: bool = field(default=False, init=False, repr=False)
+    periodic_x: bool = field(default=True, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        _validate_planar_counts("channel", self.nx, self.ny)
+        if not isinstance(self.nx, int) or isinstance(self.nx, bool) or self.nx < 3:
+            raise ValueError("channel nx must be an integer greater than or equal to 3")
+        if not isinstance(self.ny, int) or isinstance(self.ny, bool) or self.ny < 2:
+            raise ValueError("channel ny must be an integer greater than or equal to 2")
         edge_length = _finite_float_option("edge_length", self.edge_length)
         if edge_length <= 0.0:
             raise ValueError("edge_length must be positive")
@@ -434,11 +438,11 @@ class ChannelGridSpec:
 
     @property
     def expected_edges(self) -> int:
-        return 3 * self.nx * self.ny + self.nx + self.ny
+        return self.nx * (3 * self.ny + 1)
 
     @property
     def expected_vertices(self) -> int:
-        return (self.nx + 1) * (self.ny + 1)
+        return self.nx * (self.ny + 1)
 
 
 @dataclass(frozen=True)
@@ -448,7 +452,7 @@ class ParallelogramGridSpec:
     nx: int
     ny: int
     edge_length: float
-    shear: float = 0.25
+    shear: float = 0.0
     name: str = ""
 
     periodic: bool = field(default=False, init=False, repr=False)

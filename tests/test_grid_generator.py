@@ -660,7 +660,7 @@ def test_geometry_optimization_and_diffusion_preserve_topology_and_boundaries():
 
 
 def test_geometry_postprocessing_rejects_invalid_option_objects():
-    grid = generate_grid(ChannelGridSpec(nx=2, ny=2, edge_length=1.0))
+    grid = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
 
     with pytest.raises(TypeError, match="OptimizationOptions"):
         optimize_grid(grid, options=0)
@@ -689,7 +689,7 @@ def test_diagnostics_and_postprocessing_core_operators():
 
 
 def test_check_grid_reports_reversed_duplicate_edges():
-    grid = generate_grid(ChannelGridSpec(nx=2, ny=2, edge_length=1.0))
+    grid = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
     edges = grid.edges.copy()
     edges[1] = edges[0][::-1]
     broken = replace(grid, edges=edges)

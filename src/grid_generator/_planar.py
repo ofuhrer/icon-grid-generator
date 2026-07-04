@@ -31,7 +31,7 @@ class PlanarTriangularTopologyBuilder:
     def build(self, spec: Any, geometry: GeometryData) -> TopologyData:
         if getattr(spec, "periodic", False):
             return _periodic_topology(spec, geometry)
-        return _open_topology(geometry)
+        return _open_topology(spec, geometry)
 
 
 class PlanarTriangularMetricsBuilder:
@@ -143,6 +143,9 @@ def _periodic_geometry(spec: Any, options: Any) -> GeometryData:
 
 
 def _open_geometry(spec: Any, options: Any) -> GeometryData:
+    if _has_periodic_x(spec):
+        return _channel_geometry(spec, options)
+
     vertices = np.zeros(((spec.nx + 1) * (spec.ny + 1), 3), dtype=np.float64)
     for j in range(spec.ny + 1):
         for i in range(spec.nx + 1):
@@ -155,11 +158,38 @@ def _open_geometry(spec: Any, options: Any) -> GeometryData:
             v10 = _open_vertex_id(i + 1, j, spec.nx)
             v01 = _open_vertex_id(i, j + 1, spec.nx)
             v11 = _open_vertex_id(i + 1, j + 1, spec.nx)
-            cells.extend(((v00, v10, v11), (v00, v11, v01)))
+            cells.extend(((v00, v10, v01), (v10, v11, v01)))
 
     cell_array = np.asarray(cells, dtype=np.int32)
     centers = vertices[cell_array].mean(axis=1)
     return _geometry_data(spec, vertices, cell_array, centers, periodic=False)
+
+
+def _channel_geometry(spec: Any, options: Any) -> GeometryData:
+    vertices = np.zeros((spec.nx * (spec.ny + 1), 3), dtype=np.float64)
+    for j in range(spec.ny + 1):
+        for i in range(spec.nx):
+            vertices[_channel_vertex_id(i, j, spec.nx)] = (*_open_xy(spec, i, j), options.radius)
+
+    cells: list[tuple[int, int, int]] = []
+    centers: list[np.ndarray] = []
+    for j in range(spec.ny):
+        for i in range(spec.nx):
+            v00 = _channel_vertex_id(i, j, spec.nx)
+            v10 = _channel_vertex_id(i + 1, j, spec.nx)
+            v01 = _channel_vertex_id(i, j + 1, spec.nx)
+            v11 = _channel_vertex_id(i + 1, j + 1, spec.nx)
+            for cell in ((v00, v10, v01), (v10, v11, v01)):
+                cells.append(cell)
+                centers.append(_channel_triangle_center(vertices, cell, spec))
+
+    return _geometry_data(
+        spec,
+        vertices,
+        np.asarray(cells, dtype=np.int32),
+        np.asarray(centers, dtype=np.float64),
+        periodic=False,
+    )
 
 
 def _geometry_data(
@@ -226,9 +256,13 @@ def _periodic_topology(spec: Any, geometry: GeometryData) -> TopologyData:
     )
 
 
-def _open_topology(geometry: GeometryData) -> TopologyData:
+def _open_topology(spec: Any, geometry: GeometryData) -> TopologyData:
     edges, cell_edges, edge_cells = _build_edges_with_boundary(geometry.cells)
-    edge_center_xyz = geometry.vertices[edges].mean(axis=1)
+    edge_center_xyz = (
+        _channel_edge_centers(geometry.vertices, edges, spec)
+        if _has_periodic_x(spec)
+        else geometry.vertices[edges].mean(axis=1)
+    )
     edge_lon = _edge_lon_from_vertices(geometry, edges)
     edge_lat = _edge_lat_from_vertices(geometry, edges)
     icon = _open_icon_connectivity(
@@ -270,7 +304,11 @@ def _topology_from_existing(grid: Any, geometry: GeometryData) -> TopologyData:
         edge_lon = _scale_to_degrees(edge_center_xyz[:, 0], grid.spec.domain_length, -180.0, 180.0)
         edge_lat = _scale_to_degrees(edge_center_xyz[:, 1], grid.spec.domain_height, -90.0, 90.0)
     else:
-        edge_center_xyz = geometry.vertices[grid.edges].mean(axis=1)
+        edge_center_xyz = (
+            _channel_edge_centers(geometry.vertices, grid.edges, grid.spec)
+            if _has_periodic_x(grid.spec)
+            else geometry.vertices[grid.edges].mean(axis=1)
+        )
         edge_lon = _edge_lon_from_vertices(geometry, grid.edges)
         edge_lat = _edge_lat_from_vertices(geometry, grid.edges)
     return TopologyData(
@@ -298,13 +336,23 @@ def _planar_metrics(spec: Any, geometry: GeometryData, topology: TopologyData) -
         np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
         axis=1,
     )
-    edge_cell_distance = _edge_cell_distances(spec, geometry, topology)
-    dual_edge_length = edge_cell_distance.sum(axis=1)
-    boundary = topology.edge_cells[:, 1] < 0
-    dual_edge_length[boundary] = 2.0 * edge_cell_distance[boundary, 0]
+    if _uses_regular_planar_metrics(spec):
+        dual_edge_length = _regular_dual_edge_lengths(spec, vectors)
+        edge_cell_distance = np.column_stack((0.5 * dual_edge_length, 0.5 * dual_edge_length))
+        dual_area = np.full(
+            geometry.vertices.shape[0],
+            2.0 * float(np.mean(cell_area)),
+            dtype=np.float64,
+        )
+    else:
+        edge_cell_distance = _edge_cell_distances(spec, geometry, topology)
+        dual_edge_length = edge_cell_distance.sum(axis=1)
+        boundary = topology.edge_cells[:, 1] < 0
+        dual_edge_length[boundary] = 2.0 * edge_cell_distance[boundary, 0]
+        dual_area = _dual_areas(geometry.vertices.shape[0], geometry.cells, cell_area)
     fields = {
         "cell_area": cell_area,
-        "dual_area": _dual_areas(geometry.vertices.shape[0], geometry.cells, cell_area),
+        "dual_area": dual_area,
         "edge_length": edge_lengths,
         "dual_edge_length": dual_edge_length,
         "edge_cell_distance": edge_cell_distance,
@@ -312,11 +360,7 @@ def _planar_metrics(spec: Any, geometry: GeometryData, topology: TopologyData) -
         "orientation_of_normal": topology.icon_connectivity["orientation_of_normal"],
         "edge_system_orientation": np.ones(topology.edges.shape[0], dtype=np.int32),
         "edge_orientation": topology.icon_connectivity["edge_orientation"],
-        "edgequad_area": (
-            np.zeros(topology.edges.shape[0], dtype=np.float64)
-            if getattr(spec, "periodic", False)
-            else 0.5 * edge_lengths * dual_edge_length
-        ),
+        "edgequad_area": np.zeros(topology.edges.shape[0], dtype=np.float64),
         "edge_primal_normal_cartesian": primal_normal,
         "edge_dual_normal_cartesian": dual_normal,
         "zonal_normal_primal_edge": primal_normal[:, 0],
@@ -352,6 +396,10 @@ def _build_edges_with_boundary(cells: np.ndarray) -> tuple[np.ndarray, np.ndarra
 
 def _periodic_vertex_id(i: int, j: int, nx: int, ny: int) -> int:
     return (j % ny) * nx + (i % nx)
+
+
+def _channel_vertex_id(i: int, j: int, nx: int) -> int:
+    return j * nx + (i % nx)
 
 
 def _open_vertex_id(i: int, j: int, nx: int) -> int:
@@ -394,11 +442,31 @@ def _periodic_triangle_center(vertices: np.ndarray, cell: tuple[int, int, int], 
     return center
 
 
+def _channel_triangle_center(vertices: np.ndarray, cell: tuple[int, int, int], spec: Any) -> np.ndarray:
+    base = vertices[cell[0]].copy()
+    points = [base]
+    for vertex in cell[1:]:
+        point = vertices[vertex].copy()
+        point[0] = base[0] + _horizontal_periodic_delta(point[0] - base[0], spec)
+        points.append(point)
+    center = np.mean(points, axis=0)
+    center[0] %= spec.nx * spec.edge_length
+    return center
+
+
 def _periodic_edge_centers(vertices: np.ndarray, edges: np.ndarray, spec: Any) -> np.ndarray:
     vectors = _edge_vectors(spec, vertices, edges)
     centers = vertices[edges[:, 0]] + 0.5 * vectors
     centers[:, 0] %= spec.domain_length
     centers[:, 1] %= spec.domain_height
+    centers[:, 2] = vertices[:, 2].mean()
+    return centers
+
+
+def _channel_edge_centers(vertices: np.ndarray, edges: np.ndarray, spec: Any) -> np.ndarray:
+    vectors = _edge_vectors(spec, vertices, edges)
+    centers = vertices[edges[:, 0]] + 0.5 * vectors
+    centers[:, 0] %= spec.nx * spec.edge_length
     centers[:, 2] = vertices[:, 2].mean()
     return centers
 
@@ -409,6 +477,11 @@ def _cell_centers_from_existing(grid: Any, vertices: np.ndarray) -> np.ndarray:
             [_periodic_triangle_center(vertices, tuple(cell), grid.spec) for cell in grid.cells],
             dtype=np.float64,
         )
+    if _has_periodic_x(grid.spec):
+        return np.asarray(
+            [_channel_triangle_center(vertices, tuple(cell), grid.spec) for cell in grid.cells],
+            dtype=np.float64,
+        )
     return vertices[grid.cells].mean(axis=1)
 
 
@@ -416,21 +489,25 @@ def _edge_vectors(spec: Any, vertices: np.ndarray, edges: np.ndarray) -> np.ndar
     vectors = vertices[edges[:, 1]] - vertices[edges[:, 0]]
     if getattr(spec, "periodic", False):
         vectors = _periodic_lattice_delta(vectors, spec)
+    elif _has_periodic_x(spec):
+        vectors[:, 0] = _horizontal_periodic_delta(vectors[:, 0], spec)
     return vectors
 
 
 def _cell_triangles(spec: Any, vertices: np.ndarray, cells: np.ndarray) -> np.ndarray:
     triangles = vertices[cells].copy()
-    if not getattr(spec, "periodic", False):
+    if not getattr(spec, "periodic", False) and not _has_periodic_x(spec):
         return triangles
     for cell_index, cell in enumerate(cells):
         base = vertices[cell[0]]
         triangles[cell_index, 0] = base
         for local_index in (1, 2):
-            triangles[cell_index, local_index] = base + _periodic_lattice_delta(
-                vertices[cell[local_index]] - base,
-                spec,
-            )
+            delta = vertices[cell[local_index]] - base
+            if getattr(spec, "periodic", False):
+                delta = _periodic_lattice_delta(delta, spec)
+            else:
+                delta[0] = _horizontal_periodic_delta(delta[0], spec)
+            triangles[cell_index, local_index] = base + delta
     return triangles
 
 
@@ -464,6 +541,34 @@ def _periodic_y_shift(spec: Any) -> float:
     return 0.5 * spec.ny * spec.edge_length * getattr(spec, "stretch_x", 1.0)
 
 
+def _horizontal_periodic_delta(delta: np.ndarray | float, spec: Any) -> np.ndarray | float:
+    period = spec.nx * spec.edge_length
+    return np.asarray(delta) - np.round(np.asarray(delta) / period) * period
+
+
+def _has_periodic_x(spec: Any) -> bool:
+    return bool(getattr(spec, "periodic_x", False))
+
+
+def _uses_regular_planar_metrics(spec: Any) -> bool:
+    return (
+        getattr(spec, "periodic", False)
+        or _has_periodic_x(spec)
+        or type(spec).__name__ == "ParallelogramGridSpec"
+    ) and not hasattr(spec, "dx")
+
+
+def _regular_dual_edge_lengths(spec: Any, edge_vectors: np.ndarray) -> np.ndarray:
+    base_length = spec.edge_length * getattr(spec, "stretch_x", 1.0)
+    y_step = spec.edge_length * sqrt(3.0) * 0.5 * getattr(spec, "stretch_y", 1.0)
+    if getattr(spec, "periodic", False) and not np.isclose(getattr(spec, "stretch_y", 1.0), 1.0):
+        phi = np.arctan2(2.0 * y_step, base_length)
+        horizontal = base_length / sqrt(3.0)
+        diagonal = 0.5 * base_length / np.sin(phi)
+        return np.where(np.isclose(edge_vectors[:, 1], 0.0), horizontal, diagonal).astype(np.float64)
+    return np.full(edge_vectors.shape[0], base_length / sqrt(3.0), dtype=np.float64)
+
+
 def _edge_cell_distances(spec: Any, geometry: GeometryData, topology: TopologyData) -> np.ndarray:
     distances = np.zeros((topology.edges.shape[0], 2), dtype=np.float64)
     for edge_index, adjacent in enumerate(topology.edge_cells):
@@ -475,6 +580,8 @@ def _edge_cell_distances(spec: Any, geometry: GeometryData, topology: TopologyDa
             delta = geometry.cell_center_xyz[cell] - topology.edge_center_xyz[edge_index]
             if getattr(spec, "periodic", False):
                 delta = _periodic_lattice_delta(delta, spec)
+            elif _has_periodic_x(spec):
+                delta[0] = _horizontal_periodic_delta(delta[0], spec)
             distances[edge_index, side] = float(np.linalg.norm(delta))
     return distances
 
