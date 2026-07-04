@@ -10,7 +10,7 @@ from ._types import GeometryData
 
 
 class SphericalIcosahedralGeometry:
-    """Build global triangular RxxByy geometry on a sphere."""
+    """Build global triangular ICON R<n>B<k> geometry on a sphere."""
 
     def build(self, spec: Any, options: Any) -> GeometryData:
         from . import grid_generator as gg

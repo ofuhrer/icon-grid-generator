@@ -1,8 +1,9 @@
 """Pure Python ICON-style geodesic grid generation.
 
-The generator creates a triangular spherical RxxByy grid with the topology,
-metric, orientation, normal-vector, and refinement-provenance fields needed to
-write a compact ICON grid NetCDF file.
+The generator accepts ICON R<n>B<k> grid names and canonicalizes them to the
+zero-padded form commonly used in ICON grid file names. It creates triangular
+spherical grids with the topology, metric, orientation, normal-vector, and
+refinement-provenance fields needed to write a compact ICON grid NetCDF file.
 """
 
 from __future__ import annotations
@@ -268,7 +269,7 @@ ICON_VARIABLE_ATTRS: dict[str, dict[str, Any]] = {
 
 @dataclass(frozen=True)
 class GlobalGridSpec:
-    """Normalized ICON RxxByy grid specification."""
+    """Normalized ICON R<n>B<k> grid specification."""
 
     root: int
     bisections: int
@@ -298,7 +299,7 @@ class GlobalGridSpec:
 
         match = GRID_NAME_RE.fullmatch(self.name.strip())
         if match is None:
-            raise ValueError("global grid name must have the form RxxByy")
+            raise ValueError("global grid name must have the form R<n>B<k>")
         name_root = int(match.group(1))
         name_bisections = int(match.group(2))
         if name_root != self.root or name_bisections != self.bisections:
@@ -857,7 +858,7 @@ def generate_grid(
     """Create a pure Python ICON geodesic, torus, or limited-area grid."""
     grid_spec = parse_grid_spec(spec) if isinstance(spec, str) else spec
     if not isinstance(grid_spec, _SUPPORTED_GRID_SPEC_TYPES):
-        raise TypeError("spec must be an RxxByy string or a supported grid spec")
+        raise TypeError("spec must be an ICON R<n>B<k> string or a supported grid spec")
     resolved_options = _resolve_options(options)
     _validate_options(grid_spec, resolved_options)
 
@@ -942,15 +943,15 @@ def _require_complete_icon_grid(grid: IconGrid) -> None:
 def parse_grid_spec(
     grid_name: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any,
 ) -> GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any:
-    """Parse and normalize an RxxByy grid name."""
+    """Parse and normalize an ICON R<n>B<k> grid name."""
     if isinstance(grid_name, _SUPPORTED_GRID_SPEC_TYPES):
         return grid_name
     if not isinstance(grid_name, str):
-        raise TypeError("grid_name must be a string such as 'R02B03'")
+        raise TypeError("grid_name must be a string such as 'R2B3' or 'R02B03'")
 
     match = GRID_NAME_RE.fullmatch(grid_name.strip())
     if match is None:
-        raise ValueError("grid_name must have the form RxxByy, for example R02B03")
+        raise ValueError("grid_name must have the form R<n>B<k>, for example R2B3 or R02B03")
 
     root = int(match.group(1))
     bisections = int(match.group(2))

@@ -19,6 +19,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
@@ -45,7 +47,7 @@ jobs:
           python -m pip install -e ".[docs]"
 
       - name: Build docs
-        run: mkdocs build --strict
+        run: python -m mkdocs build --strict
 
       - name: Configure GitHub Pages
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'

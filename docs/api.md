@@ -2,16 +2,16 @@
 
 ## Public Entry Point
 
-- `generate_grid(spec, options=None)` creates an `IconGrid` from an RxxByy string
-  or a grid specification object.
+- `generate_grid(spec, options=None)` creates an `IconGrid` from an ICON
+  `R<n>B<k>` string or a grid specification object.
 - `parse_grid_spec(grid_name)` parses compact global grid names such as
-  `R02B03`.
+  `R2B3` and returns canonical zero-padded names such as `R02B03`.
 - `grid_uuid(grid_name, ...)` returns a stable UUID for supported grid
   parameters.
 
 ## Grid Specifications
 
-- `GlobalGridSpec` describes spherical ICON RxxByy grids.
+- `GlobalGridSpec` describes spherical ICON `R<n>B<k>` grids.
 - `TorusGridSpec` describes planar doubly periodic triangular torus grids.
 - `LimitedAreaGridSpec` extracts a region from a generated global parent grid.
 - `StretchedTorusGridSpec`, `ChannelGridSpec`, `ParallelogramGridSpec`, and
@@ -38,3 +38,37 @@
 - `triangle_properties(grid)` returns per-cell triangle metrics.
 - `optimize_grid(grid, options=None)` and `diffuse_grid(grid, options=None)`
   return geometry-transformed copies with unchanged topology.
+
+## Public API Inventory
+
+Every name exported from `grid_generator.__all__` should appear here so public
+documentation moves with API changes:
+
+- `ChannelGridSpec`
+- `CircleRegion`
+- `CutGridSpec`
+- `DiffusionOptions`
+- `GridCheckResult`
+- `GridStatistics`
+- `IconGrid`
+- `IconGridOptions`
+- `GlobalGridSpec`
+- `LimitedAreaGridSpec`
+- `LonLatBoxRegion`
+- `OptimizationOptions`
+- `OrientedRectangleRegion`
+- `ParallelogramGridSpec`
+- `PolygonRegion`
+- `RaggedOrthogonalGridSpec`
+- `StretchedTorusGridSpec`
+- `TriangleProperties`
+- `TorusGridSpec`
+- `cell_divergence`
+- `cell_vorticity_fnorm`
+- `check_grid`
+- `cut_grid`
+- `diffuse_grid`
+- `generate_grid`
+- `grid_statistics`
+- `optimize_grid`
+- `triangle_properties`

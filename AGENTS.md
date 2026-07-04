@@ -25,9 +25,21 @@ public API documented in `README.md` and `docs/api.md`.
 - Geometry/topology changes must test counts, bounds, adjacency, finite numeric
   fields, and relevant metadata.
 - UUID behavior is a compatibility contract.
+- Keep local generated artifacts, exploratory comparison outputs, and cloned
+  external sources under `tmp/`; that directory is ignored and must stay out of
+  tracked docs, code, and assets.
+- Do not add references to deprecated implementation paths or names in tracked
+  docs, code, images, or generated assets.
 - Do not commit generated `dist/`, `build/`, `site/`, cache, or `tmp/` content.
 
 ## Required Checks
+
+Install local development extras before running checks:
+
+```bash
+python -m pip install -e ".[test,docs,netcdf,xarray]"
+python -m pip install build twine
+```
 
 Run the focused checks for normal code changes:
 
@@ -43,6 +55,21 @@ make package
 
 For docs-only changes, `make docs` is sufficient. If `make` is unavailable, use
 the commands in the `Makefile` directly.
+
+Before handing work back from an agent session, run the full local check:
+
+```bash
+make check
+```
+
+If a change touches public specs, `generate_grid()`, `IconGrid`, NetCDF export,
+metadata, UUIDs, or examples, update the matching README/docs/API text and tests
+in the same change. Do not leave generated `site/` output or comparison files as
+tracked changes.
+
+Use `make contract-compare REF_EXE=/path/to/reference-command` only for manual
+local contract checks; it depends on ignored files under `tmp/` and is not a CI
+target.
 
 ## Contribution Policy
 

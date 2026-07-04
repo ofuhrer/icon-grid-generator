@@ -1,4 +1,4 @@
-"""Pure Python ICON RxxByy geodesic grid generation."""
+"""Pure Python ICON R<n>B<k> geodesic grid generation."""
 
 from .grid_generator import (
     ChannelGridSpec,

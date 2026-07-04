@@ -21,6 +21,20 @@ deterministic pipeline:
   accidentally.
 - Grid UUIDs must stay stable for unchanged canonical inputs.
 
+## Feature Boundaries
+
+- The package is Python API first. Keep command wrappers and workflow glue out
+  unless they support an existing public API use case.
+- Global, planar, limited-area, optimization, diffusion, diagnostics, and
+  NetCDF export features should share the `IconGrid` data model.
+- Triangular grids are the supported cell family. Add other cell families only
+  with explicit public API, NetCDF, and diagnostic contracts.
+- Ragged planar grids are deterministic Python variants; test structural
+  validity and exported contracts rather than assuming metric identity with
+  regular planar grids.
+- Parent/provenance indices belong in `IconGrid.refinement`; metadata should
+  carry descriptive scalar attributes only.
+
 ## Testing Expectations
 
 Changes to geometry, topology, metrics, refinement, limited-area extraction, or

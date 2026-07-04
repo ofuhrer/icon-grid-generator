@@ -176,6 +176,7 @@ def geometric_dual_areas_from_cell_centers(grid, sphere_radius):
 def test_parse_grid_spec_normalizes_supported_names_and_expected_counts():
     assert parse_grid_spec("R01B01").name == "R01B01"
     assert parse_grid_spec("R1B1").name == "R01B01"
+    assert parse_grid_spec("R2B6").name == "R02B06"
     assert parse_grid_spec(" r02b03 ").name == "R02B03"
 
     spec = parse_grid_spec("R02B03")
@@ -202,10 +203,11 @@ def test_global_grid_spec_normalizes_or_rejects_custom_name():
 
     assert spec.name == "R02B03"
     assert gg.grid_uuid(spec.name) == gg.grid_uuid("R02B03")
+    assert GlobalGridSpec(root=2, bisections=6, name="r2b6").name == "R02B06"
 
     with pytest.raises(ValueError, match="name must match"):
         GlobalGridSpec(root=2, bisections=3, name="R01B00")
-    with pytest.raises(ValueError, match="form RxxByy"):
+    with pytest.raises(ValueError, match=r"form R<n>B<k>"):
         GlobalGridSpec(root=1, bisections=0, name="custom")
 
 

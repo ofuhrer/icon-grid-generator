@@ -4,7 +4,7 @@
 
 Initial public release.
 
-- Generate global spherical ICON RxxByy grids.
+- Generate global spherical ICON `R<n>B<k>` grids.
 - Generate planar doubly periodic torus grids.
 - Extract limited-area grids from generated global parent grids.
 - Export ICON-style NetCDF grid files with optional `netCDF4` support.

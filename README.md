@@ -10,13 +10,14 @@ Pure Python generation of ICON-style triangular grids.
 
 ![Global ICON grid resolutions](docs/assets/global-icon-grid-series.png)
 
-ICON Grid Generator creates spherical RxxByy grids, planar triangular grids,
-limited-area extracts, and ICON-style NetCDF files without depending on ICON
-model runtimes or stencil frameworks.
+ICON Grid Generator creates spherical ICON `R<n>B<k>` grids, planar triangular
+grids, limited-area extracts, and ICON-style NetCDF files without depending on
+ICON model runtimes or stencil frameworks.
 
 ## Features
 
-- Generate global spherical ICON grids from compact names such as `R02B03`.
+- Generate global spherical ICON grids from names such as `R2B3`, canonicalized
+  to zero-padded names such as `R02B03`.
 - Generate planar doubly periodic torus grids and additional planar variants.
 - Extract limited-area grids from generated global parent grids.
 - Export ICON-style NetCDF grid files with optional `netCDF4` support.
@@ -44,6 +45,15 @@ Install development dependencies with:
 python -m pip install -e ".[test,docs]"
 ```
 
+## Grid Naming
+
+The ICON documentation describes grid file names with the generic nomenclature
+[`R<n>B<k>`](https://docs.icon-model.org/documentation/buildrun/buildrun_input_data.html),
+where `n` is the number of root divisions and `k` is the number of subsequent
+bisections. ICON examples also commonly use zero-padded grid file names such as
+`R02B06`. This package accepts both compact names (`R2B6`) and zero-padded names
+(`R02B06`), then stores labels and metadata in the zero-padded form.
+
 ## Quick Start
 
 Generate a global spherical grid:
@@ -51,14 +61,14 @@ Generate a global spherical grid:
 ```python
 from grid_generator import generate_grid
 
-grid = generate_grid("R02B03")
+grid = generate_grid("R2B3")
 print(grid.name)
 print(grid.dims)
 ```
 
 Example output:
 
-```python
+```text
 R02B03
 {'cell': 1280, 'vertex': 642, 'edge': 1920}
 ```
