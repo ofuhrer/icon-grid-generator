@@ -35,6 +35,37 @@ class OptimizationOptions:
 
 
 @dataclass(frozen=True)
+class GlobalOptimizationOptions:
+    """Options for spring-relaxed global spherical grids."""
+
+    method: str = "none"
+    iterations: int = 250
+    dt: float = 0.04
+    friction: float = 0.8
+    spring_stiffness: float = 1.0
+    area_weight: float = 0.008
+    pentagon_stretch: float = 1.24
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.method, str):
+            raise TypeError("global optimization method must be a string")
+        if self.method not in {"none", "spring"}:
+            raise ValueError("global optimization method must be 'none' or 'spring'")
+        _validate_iterations("global optimization iterations", self.iterations)
+        for name in ("dt", "friction", "spring_stiffness", "area_weight", "pentagon_stretch"):
+            value = finite_float_option(name, getattr(self, name))
+            if name == "friction":
+                if not 0.0 <= value < 1.0:
+                    raise ValueError("friction must be in [0, 1)")
+            elif name in {"dt", "spring_stiffness", "pentagon_stretch"}:
+                if value <= 0.0:
+                    raise ValueError(f"{name} must be positive")
+            elif value < 0.0:
+                raise ValueError("area_weight must be non-negative")
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True)
 class DiffusionOptions:
     """Options for explicit geometry diffusion over vertex adjacency."""
 
@@ -60,6 +91,35 @@ class DiffusionOptions:
         object.__setattr__(self, "diffusion_constant", diffusion_constant)
         object.__setattr__(self, "dt", dt)
         object.__setattr__(self, "neighbor_weight", neighbor_weight)
+
+
+def resolve_global_optimization_options(value: Any) -> GlobalOptimizationOptions:
+    """Normalize global optimization option shorthands."""
+    if value is None:
+        return GlobalOptimizationOptions()
+    if isinstance(value, GlobalOptimizationOptions):
+        return value
+    if isinstance(value, str):
+        return GlobalOptimizationOptions(method=value)
+    if isinstance(value, dict):
+        return GlobalOptimizationOptions(**value)
+    raise TypeError(
+        "global_optimization must be None, a method string, a mapping, "
+        "or a GlobalOptimizationOptions instance"
+    )
+
+
+def optimize_global_grid(grid: Any, options: GlobalOptimizationOptions | None = None) -> Any:
+    """Return a spring-relaxed global spherical grid with unchanged topology."""
+    opts = GlobalOptimizationOptions(method="spring") if options is None else options
+    if not isinstance(opts, GlobalOptimizationOptions):
+        raise TypeError("options must be a GlobalOptimizationOptions instance or None")
+    if opts.method == "none" or opts.iterations == 0:
+        return grid
+    if grid.metadata.get("grid_geometry") != 1:
+        raise ValueError("global optimization requires a spherical global grid")
+    vertices = _spring_relaxed_vertices(grid, opts)
+    return _rebuild_grid(grid, vertices)
 
 
 def optimize_grid(grid: Any, options: OptimizationOptions | None = None) -> Any:
@@ -108,6 +168,80 @@ def _validate_iterations(name: str, value: Any) -> None:
         raise TypeError(f"{name} must be a non-negative integer")
     if value < 0:
         raise ValueError(f"{name} must be non-negative")
+
+
+def _spring_relaxed_vertices(grid: Any, opts: GlobalOptimizationOptions) -> np.ndarray:
+    from . import grid_generator as gg
+
+    vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
+    edges = np.asarray(grid.edges, dtype=np.int64)
+    cells = np.asarray(grid.cells, dtype=np.int64)
+    degrees = np.bincount(edges.ravel(), minlength=vertices.shape[0])
+    pentagon_edge = (degrees[edges[:, 0]] == 5) | (degrees[edges[:, 1]] == 5)
+    velocity = np.zeros_like(vertices)
+
+    for _ in range(opts.iterations):
+        force = _edge_spring_force(vertices, edges, pentagon_edge, opts)
+        if opts.area_weight > 0.0:
+            force += _cell_area_force(vertices, cells, opts.area_weight, gg)
+        force -= np.sum(force * vertices, axis=1)[:, np.newaxis] * vertices
+        velocity = opts.friction * velocity + opts.dt * force
+        vertices = vertices + velocity
+        vertices = _project_vertices(grid, vertices)
+    return vertices
+
+
+def _edge_spring_force(
+    vertices: np.ndarray,
+    edges: np.ndarray,
+    pentagon_edge: np.ndarray,
+    opts: GlobalOptimizationOptions,
+) -> np.ndarray:
+    start = vertices[edges[:, 0]]
+    end = vertices[edges[:, 1]]
+    chord = end - start
+    chord_length = np.linalg.norm(chord, axis=1)
+    arc_length = 2.0 * np.arcsin(np.clip(0.5 * chord_length, 0.0, 1.0))
+    target = np.mean(arc_length) * np.where(pentagon_edge, opts.pentagon_stretch, 1.0)
+
+    start_direction = end - np.sum(end * start, axis=1)[:, np.newaxis] * start
+    end_direction = start - np.sum(start * end, axis=1)[:, np.newaxis] * end
+    start_direction = _normalize_force_rows(start_direction)
+    end_direction = _normalize_force_rows(end_direction)
+
+    edge_force = opts.spring_stiffness * (arc_length - target)
+    force = np.zeros_like(vertices)
+    np.add.at(force, edges[:, 0], edge_force[:, np.newaxis] * start_direction)
+    np.add.at(force, edges[:, 1], edge_force[:, np.newaxis] * end_direction)
+    return force
+
+
+def _cell_area_force(vertices: np.ndarray, cells: np.ndarray, weight: float, gg: Any) -> np.ndarray:
+    areas = gg._cell_areas(vertices, cells, 1.0)
+    mean_area = float(np.mean(areas))
+    if mean_area <= 0.0:
+        return np.zeros_like(vertices)
+    cell_centers = vertices[cells].sum(axis=1)
+    cell_centers = _normalize_force_rows(cell_centers)
+    area_deviation = (areas - mean_area) / mean_area
+
+    force = np.zeros_like(vertices)
+    for local_index in range(cells.shape[1]):
+        vertex_index = cells[:, local_index]
+        vertex = vertices[vertex_index]
+        direction = cell_centers - np.sum(cell_centers * vertex, axis=1)[:, np.newaxis] * vertex
+        direction = _normalize_force_rows(direction)
+        np.add.at(force, vertex_index, weight * area_deviation[:, np.newaxis] * direction)
+    return force
+
+
+def _normalize_force_rows(values: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(values, axis=1)
+    normalized = values.copy()
+    active = norms > 0.0
+    normalized[active] /= norms[active, np.newaxis]
+    normalized[~active] = 0.0
+    return normalized
 
 
 def _vertex_adjacency(grid: Any) -> list[list[int]]:

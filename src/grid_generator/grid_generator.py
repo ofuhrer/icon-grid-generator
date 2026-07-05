@@ -25,6 +25,11 @@ from ._geometry import SphericalIcosahedralGeometry
 from ._io import IconNetcdfWriter
 from ._limited_area import LimitedAreaExtractor
 from ._metrics import SphericalMetricsBuilder
+from ._optimization import (
+    GlobalOptimizationOptions,
+    optimize_global_grid,
+    resolve_global_optimization_options,
+)
 from ._ordering import IconOrderingBuilder
 from ._planar import (
     PlanarRefinementBuilder,
@@ -751,10 +756,20 @@ class IconGridOptions:
 
     max_cells: int | None = 2_000_000
     accelerator: str = "auto"
+    global_optimization: GlobalOptimizationOptions = field(
+        default_factory=GlobalOptimizationOptions
+    )
     radius: float = 1.0
     sphere_radius: float = EARTH_RADIUS_M
     rotation_axis: tuple[float, float, float] = (1.0, 0.0, 0.0)
     rotation_angle_degrees: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "global_optimization",
+            resolve_global_optimization_options(self.global_optimization),
+        )
 
 
 @dataclass(frozen=True)
@@ -1053,6 +1068,8 @@ def _generate_grid(
         refinement=refinement.fields,
         metadata=metadata,
     )
+    if options.global_optimization.method != "none":
+        grid = optimize_global_grid(grid, options.global_optimization)
     context.grids[cache_key] = grid
     return grid
 
@@ -2520,6 +2537,18 @@ def _metadata(
         "semi_major_axis": options.sphere_radius,
         "inverse_flattening": 0.0,
     }
+    if isinstance(spec, GlobalGridSpec):
+        metadata["global_optimization"] = options.global_optimization.method
+        if options.global_optimization.method != "none":
+            metadata.update(
+                {
+                    "global_optimization_iterations": options.global_optimization.iterations,
+                    "global_optimization_area_weight": options.global_optimization.area_weight,
+                    "global_optimization_pentagon_stretch": (
+                        options.global_optimization.pentagon_stretch
+                    ),
+                }
+            )
     if isinstance(spec, TorusGridSpec):
         metadata.update(
             {
@@ -2594,11 +2623,30 @@ def _spec_uuid(
     options: IconGridOptions,
 ) -> str:
     if isinstance(spec, GlobalGridSpec):
-        return grid_uuid(
-            spec.name,
-            sphere_radius=options.sphere_radius,
-            rotation_axis=options.rotation_axis,
-            rotation_angle_degrees=options.rotation_angle_degrees,
+        if options.global_optimization.method == "none":
+            return grid_uuid(
+                spec.name,
+                sphere_radius=options.sphere_radius,
+                rotation_axis=options.rotation_axis,
+                rotation_angle_degrees=options.rotation_angle_degrees,
+            )
+        payload = {
+            "generator": "grid_generator",
+            "grid": spec.name,
+            "sphere_radius": _canonical_float(options.sphere_radius),
+            "rotation": _canonical_rotation(
+                options.rotation_axis,
+                options.rotation_angle_degrees,
+            ),
+            "global_optimization": _canonicalize_payload(
+                asdict(options.global_optimization)
+            ),
+        }
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            )
         )
     payload: dict[str, Any] = {
         "generator": "grid_generator",

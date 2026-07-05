@@ -1,4 +1,4 @@
-"""Ordering helpers matching ICON grid-generator conventions where possible."""
+"""Ordering helpers matching ICON connectivity conventions where possible."""
 
 from __future__ import annotations
 

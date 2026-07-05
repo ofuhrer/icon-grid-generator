@@ -48,6 +48,12 @@ def validate_grid_options(spec: Any, options: Any) -> None:
         raise ValueError(f"accelerator must be one of: {names}")
     should_use_numba(options.accelerator)
 
+    global_optimization = getattr(options, "global_optimization", None)
+    if global_optimization is None:
+        raise TypeError("global_optimization must be a valid optimization option")
+    if global_optimization.method != "none" and not hasattr(spec, "bisections"):
+        raise ValueError("global_optimization is only supported for global grids")
+
     if options.max_cells is not None:
         if not isinstance(options.max_cells, int) or isinstance(options.max_cells, bool):
             raise TypeError("max_cells must be None or a positive integer")

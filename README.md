@@ -18,6 +18,7 @@ ICON model runtimes or stencil frameworks.
 
 - Generate global spherical ICON grids from names such as `R2B3`, canonicalized
   to zero-padded names such as `R02B03`.
+- Generate spring-relaxed global grids for improved metric quality.
 - Generate planar doubly periodic torus grids and additional planar variants.
 - Extract limited-area grids from generated global parent grids.
 - Export ICON-style NetCDF grid files with optional `netCDF4` support.
@@ -76,7 +77,14 @@ Example output:
 
 ```text
 R02B03
-{'cell': 1280, 'vertex': 642, 'edge': 1920}
+{'cell': 5120, 'vertex': 2562, 'edge': 7680}
+```
+
+Generate a spring-relaxed global grid:
+
+```python
+grid = generate_grid("R2B3", options={"max_cells": None, "global_optimization": "spring"})
+print(grid.metadata["global_optimization"])
 ```
 
 Generate a planar torus grid:

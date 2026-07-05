@@ -13,6 +13,7 @@ from grid_generator import (
     CircleRegion,
     CutGridSpec,
     DiffusionOptions,
+    GlobalOptimizationOptions,
     LonLatBoxRegion,
     IconGrid,
     IconGridOptions,
@@ -32,6 +33,7 @@ from grid_generator import (
     diffuse_grid,
     generate_grid,
     grid_statistics,
+    optimize_global_grid,
     optimize_grid,
     triangle_properties,
 )
@@ -52,6 +54,7 @@ def test_public_package_exports_only_supported_grid_api():
         "DiffusionOptions",
         "GridCheckResult",
         "GridStatistics",
+        "GlobalOptimizationOptions",
         "IconGrid",
         "IconGridOptions",
         "GlobalGridSpec",
@@ -72,6 +75,7 @@ def test_public_package_exports_only_supported_grid_api():
         "diffuse_grid",
         "generate_grid",
         "grid_statistics",
+        "optimize_global_grid",
         "optimize_grid",
         "triangle_properties",
     ]
@@ -89,6 +93,7 @@ def test_public_package_exports_only_supported_grid_api():
     assert grid_generator_package.TorusGridSpec is TorusGridSpec
     assert grid_generator_package.generate_grid is generate_grid
     assert grid_generator_package.ChannelGridSpec is ChannelGridSpec
+    assert grid_generator_package.optimize_global_grid is optimize_global_grid
     assert grid_generator_package.optimize_grid is optimize_grid
     assert grid_generator_package.check_grid is check_grid
 
@@ -295,11 +300,78 @@ def test_generate_grid_accepts_all_public_grid_specs():
         ({"rotation_angle_degrees": "0.05"}, TypeError, "rotation_angle_degrees"),
         ({"accelerator": 1}, TypeError, "accelerator"),
         ({"accelerator": "fast"}, ValueError, "accelerator"),
+        ({"global_optimization": 1}, TypeError, "global_optimization"),
+        ({"global_optimization": "fast"}, ValueError, "global optimization method"),
+        (
+            {"global_optimization": {"method": "spring", "iterations": -1}},
+            ValueError,
+            "iterations",
+        ),
+        (
+            {"global_optimization": {"method": "spring", "friction": 1.0}},
+            ValueError,
+            "friction",
+        ),
     ],
 )
 def test_generate_grid_rejects_invalid_options(options, error, message):
     with pytest.raises(error, match=message):
         generate_grid("R01B00", options=options)
+
+
+def test_global_spring_optimization_preserves_topology_and_improves_quality():
+    raw = generate_grid("R02B02", options={"max_cells": None})
+    optimized = generate_grid("R02B02", options={"max_cells": None, "global_optimization": "spring"})
+
+    assert optimized.dims == raw.dims
+    assert np.array_equal(optimized.cells, raw.cells)
+    assert np.array_equal(optimized.edges, raw.edges)
+    assert np.array_equal(optimized.cell_edges, raw.cell_edges)
+    assert np.array_equal(optimized.edge_cells, raw.edge_cells)
+    assert_unit_sphere(optimized.vertices)
+    assert optimized.metadata["global_optimization"] == "spring"
+    assert optimized.metadata["global_optimization_iterations"] == 250
+    assert optimized.metadata["uuidOfHGrid"] != raw.metadata["uuidOfHGrid"]
+
+    raw_cell_cv = np.std(raw.geometry["cell_area"]) / np.mean(raw.geometry["cell_area"])
+    optimized_cell_cv = np.std(optimized.geometry["cell_area"]) / np.mean(
+        optimized.geometry["cell_area"]
+    )
+    raw_edge_cv = np.std(raw.geometry["edge_length"]) / np.mean(raw.geometry["edge_length"])
+    optimized_edge_cv = np.std(optimized.geometry["edge_length"]) / np.mean(
+        optimized.geometry["edge_length"]
+    )
+
+    assert optimized_cell_cv < 0.5 * raw_cell_cv
+    assert optimized_edge_cv < 0.8 * raw_edge_cv
+
+
+def test_global_optimization_options_can_be_configured_and_called_directly():
+    raw = generate_grid("R02B01", options={"max_cells": None})
+    options = GlobalOptimizationOptions(
+        method="spring",
+        iterations=20,
+        area_weight=0.004,
+        pentagon_stretch=1.1,
+    )
+    optimized = optimize_global_grid(raw, options)
+    facade = generate_grid(
+        "R02B01",
+        options={"max_cells": None, "global_optimization": options},
+    )
+
+    assert optimized.dims == raw.dims
+    assert facade.metadata["global_optimization_iterations"] == 20
+    assert np.all(np.isfinite(optimized.geometry["cell_area"]))
+    assert not np.allclose(optimized.vertices, raw.vertices)
+
+
+def test_global_optimization_is_rejected_for_planar_specs():
+    with pytest.raises(ValueError, match="only supported for global grids"):
+        generate_grid(
+            TorusGridSpec(nx=4, ny=4, edge_length=1.0),
+            options={"global_optimization": "spring"},
+        )
 
 
 def test_numpy_accelerator_matches_auto_for_global_grid():

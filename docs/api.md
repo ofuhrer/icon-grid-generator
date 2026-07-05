@@ -24,6 +24,10 @@
   experimental Numba acceleration. The default `"auto"` uses the reference path
   for small grids and may use Numba for large parent-provenance lookups when
   Numba is installed.
+- `IconGridOptions(global_optimization="spring")` or
+  `GlobalOptimizationOptions(method="spring", ...)` enables spring-relaxed
+  global spherical grids with unchanged topology and recomputed metrics. The
+  default is `"none"` to preserve raw bisection grids.
 
 ## Grid Object
 
@@ -58,6 +62,7 @@ documentation moves with API changes:
 - `DiffusionOptions`
 - `GridCheckResult`
 - `GridStatistics`
+- `GlobalOptimizationOptions`
 - `IconGrid`
 - `IconGridOptions`
 - `GlobalGridSpec`
@@ -78,5 +83,6 @@ documentation moves with API changes:
 - `diffuse_grid`
 - `generate_grid`
 - `grid_statistics`
+- `optimize_global_grid`
 - `optimize_grid`
 - `triangle_properties`
