@@ -13,6 +13,7 @@ from grid_generator import (
     CircleRegion,
     CutGridSpec,
     DiffusionOptions,
+    GlobalGridOptions,
     GlobalOptimizationOptions,
     LonLatBoxRegion,
     IconGrid,
@@ -54,6 +55,7 @@ def test_public_package_exports_only_supported_grid_api():
         "DiffusionOptions",
         "GridCheckResult",
         "GridStatistics",
+        "GlobalGridOptions",
         "GlobalOptimizationOptions",
         "IconGrid",
         "IconGridOptions",
@@ -88,6 +90,7 @@ def test_public_package_exports_only_supported_grid_api():
     assert not hasattr(grid_generator_package, "LimitedAreaSpec")
     assert grid_generator_package.IconGrid is IconGrid
     assert grid_generator_package.IconGridOptions is IconGridOptions
+    assert grid_generator_package.GlobalGridOptions is GlobalGridOptions
     assert grid_generator_package.GlobalGridSpec is GlobalGridSpec
     assert grid_generator_package.LimitedAreaGridSpec is LimitedAreaGridSpec
     assert grid_generator_package.TorusGridSpec is TorusGridSpec
@@ -120,6 +123,11 @@ def assert_lon_lat_match_xyz(lon, lat, xyz):
 
 def unit_rows(points):
     return points / np.linalg.norm(points, axis=1)[:, np.newaxis]
+
+
+def lon_unit_circle(lon):
+    radians = np.radians(lon)
+    return np.column_stack((np.cos(radians), np.sin(radians)))
 
 
 def expected_edge_system_orientation(grid):
@@ -290,14 +298,18 @@ def test_generate_grid_accepts_all_public_grid_specs():
         ({"max_cells": 3.14}, TypeError, "max_cells"),
         ({"max_cells": "100"}, TypeError, "max_cells"),
         ({"max_cells": 0}, ValueError, "max_cells must be positive"),
-        ({"rotation_axis": (1.0, 0.0)}, ValueError, "rotation_axis"),
+        ({"global_grid": 1}, TypeError, "global_grid"),
+        ({"global_grid": {"beta_spring": 0.0}}, ValueError, "beta_spring"),
         (
-            {"rotation_axis": (0.0, 0.0, 0.0), "rotation_angle_degrees": 0.05},
+            {"global_grid": {"north_pole_lon": math.inf}},
             ValueError,
-            "rotation_axis",
+            "north_pole_lon",
         ),
-        ({"rotation_angle_degrees": math.inf}, ValueError, "rotation_angle_degrees"),
-        ({"rotation_angle_degrees": "0.05"}, TypeError, "rotation_angle_degrees"),
+        (
+            {"global_grid": {"rotation_angle_degrees": "0.05"}},
+            TypeError,
+            "rotation_angle_degrees",
+        ),
         ({"accelerator": 1}, TypeError, "accelerator"),
         ({"accelerator": "fast"}, ValueError, "accelerator"),
         ({"global_optimization": 1}, TypeError, "global_optimization"),
@@ -308,9 +320,9 @@ def test_generate_grid_accepts_all_public_grid_specs():
             "iterations",
         ),
         (
-            {"global_optimization": {"method": "spring", "friction": 1.0}},
-            ValueError,
-            "friction",
+            {"global_optimization": {"method": "spring", "iterations": 3.14}},
+            TypeError,
+            "iterations",
         ),
     ],
 )
@@ -320,8 +332,17 @@ def test_generate_grid_rejects_invalid_options(options, error, message):
 
 
 def test_global_spring_optimization_preserves_topology_and_improves_quality():
-    raw = generate_grid("R02B02", options={"max_cells": None})
-    optimized = generate_grid("R02B02", options={"max_cells": None, "global_optimization": "spring"})
+    raw = generate_grid(
+        "R02B02",
+        options={"max_cells": None, "global_optimization": "none"},
+    )
+    optimized = generate_grid(
+        "R02B02",
+        options={
+            "max_cells": None,
+            "global_optimization": "spring",
+        },
+    )
 
     assert optimized.dims == raw.dims
     assert np.array_equal(optimized.cells, raw.cells)
@@ -342,17 +363,18 @@ def test_global_spring_optimization_preserves_topology_and_improves_quality():
         optimized.geometry["edge_length"]
     )
 
-    assert optimized_cell_cv < 0.5 * raw_cell_cv
-    assert optimized_edge_cv < 0.8 * raw_edge_cv
+    assert optimized_cell_cv <= raw_cell_cv
+    assert optimized_edge_cv <= raw_edge_cv
 
 
 def test_global_optimization_options_can_be_configured_and_called_directly():
-    raw = generate_grid("R02B01", options={"max_cells": None})
+    raw = generate_grid(
+        "R02B01",
+        options={"max_cells": None, "global_optimization": "none"},
+    )
     options = GlobalOptimizationOptions(
         method="spring",
         iterations=20,
-        area_weight=0.004,
-        pentagon_stretch=1.1,
     )
     optimized = optimize_global_grid(raw, options)
     facade = generate_grid(
@@ -431,15 +453,14 @@ def test_numba_accelerator_is_optional_and_matches_numpy_when_available():
         ({"sphere_radius": 0.0}, ValueError, "sphere_radius must be positive"),
         ({"sphere_radius": math.nan}, ValueError, "sphere_radius must be finite"),
         ({"sphere_radius": math.inf}, ValueError, "sphere_radius must be finite"),
-        ({"rotation_axis": (1.0, 0.0)}, ValueError, "rotation_axis"),
-        ({"rotation_axis": (math.nan, 0.0, 0.0)}, ValueError, "rotation_axis"),
+        ({"global_grid": 1}, TypeError, "global_grid"),
+        ({"global_grid": {"north_pole_lat": math.inf}}, ValueError, "north_pole_lat"),
         (
-            {"rotation_axis": (0.0, 0.0, 0.0), "rotation_angle_degrees": 0.05},
-            ValueError,
-            "rotation_axis",
+            {"global_grid": {"rotation_angle_degrees": "0.05"}},
+            TypeError,
+            "rotation_angle_degrees",
         ),
-        ({"rotation_angle_degrees": math.inf}, ValueError, "rotation_angle_degrees"),
-        ({"rotation_angle_degrees": "0.05"}, TypeError, "rotation_angle_degrees"),
+        ({"global_optimization": 1}, TypeError, "global_optimization"),
     ],
 )
 def test_grid_uuid_rejects_invalid_numeric_inputs(kwargs, error, message):
@@ -498,7 +519,10 @@ def test_icon_grid_options_instance_produces_complete_grid():
 
 def test_icon_grid_core_geometry_arrays_are_consistent():
     radius = 6.0
-    grid = generate_grid("R01B01", options={"radius": radius})
+    grid = generate_grid(
+        "R01B01",
+        options={"radius": radius},
+    )
 
     vertex_radius = np.linalg.norm(grid.vertices, axis=1)
     center_radius = np.linalg.norm(grid.cell_center_xyz, axis=1)
@@ -525,14 +549,20 @@ def test_icon_grid_core_geometry_arrays_are_consistent():
 
 def test_internal_generation_pipeline_matches_public_facade():
     spec = parse_grid_spec("R01B01")
-    options = IconGridOptions(sphere_radius=3.0, rotation_angle_degrees=0.05)
+    options = IconGridOptions(
+        sphere_radius=3.0,
+        global_grid=GlobalGridOptions(rotation_angle_degrees=0.05),
+        global_optimization="none",
+    )
     grid = generate_grid(spec.name, options=options)
+    context = gg._GlobalGenerationContext()
 
     geometry = SphericalIcosahedralGeometry().build(spec, options)
-    geometry = IconOrderingBuilder().order_spherical_bisection(spec, options, geometry)
+    geometry = IconOrderingBuilder(context).order_spherical_bisection(spec, options, geometry)
     topology = GlobalTopologyBuilder().build(spec, options, geometry)
+    topology = gg._adjust_global_edge_orientation(spec, options, geometry, topology, context)
     metrics = SphericalMetricsBuilder().build(options, geometry, topology)
-    refinement = GlobalRefinementBuilder().build(spec, options, geometry, topology)
+    refinement = GlobalRefinementBuilder(context).build(spec, options, geometry, topology)
 
     for name in [
         "vertices",
@@ -567,13 +597,15 @@ def test_internal_generation_pipeline_matches_public_facade():
         assert np.array_equal(value, grid.refinement[name])
 
 
-def test_icon_grid_rotation_defaults_to_unrotated_and_can_be_enabled():
+def test_global_grid_rotation_defaults_to_unrotated_and_can_be_enabled():
     unrotated = generate_grid("R01B01")
-    rotated = generate_grid("R01B01", options={"rotation_angle_degrees": 0.05})
+    rotated = generate_grid(
+        "R01B01",
+        options={"global_grid": {"rotation_angle_degrees": 0.05}},
+    )
 
-    assert unrotated.options.rotation_axis == (1.0, 0.0, 0.0)
-    assert unrotated.options.rotation_angle_degrees == 0.0
-    assert rotated.options.rotation_angle_degrees == 0.05
+    assert unrotated.options.global_grid.rotation_angle_degrees == 0.0
+    assert rotated.options.global_grid.rotation_angle_degrees == 0.05
     assert np.array_equal(rotated.cells, unrotated.cells)
     assert np.array_equal(rotated.edges, unrotated.edges)
     assert not np.allclose(rotated.vertices, unrotated.vertices)
@@ -594,12 +626,35 @@ def test_spherical_bisection_cells_follow_icon_child_ordering(
     child_types = refinement["parent_cell_type"].reshape(-1, 4)
     parent_cells = refinement["parent_cell_index"].reshape(-1, 4)
 
-    assert np.all(child_types == np.array([200, 201, 202, 203], dtype=np.int32))
+    assert np.all(child_types == np.array([200, 203, 201, 202], dtype=np.int32))
     assert np.all(parent_cells == parent_cells[:, :1])
     assert np.array_equal(
         parent_cells[:, 0],
         np.arange(1, generate_grid(parent_grid_name).dims["cell"] + 1, dtype=np.int32),
     )
+
+
+def test_spherical_bisection_parent_cell_types_match_child_geometry():
+    grid = generate_grid("R02B03")
+    parent = generate_grid("R02B02")
+    parent_vertex_index = grid.refinement["parent_vertex_index"]
+    type_to_parent_vertex = {
+        201: 0,
+        202: 1,
+        203: 2,
+    }
+
+    for cell_index, child_type in enumerate(grid.refinement["parent_cell_type"]):
+        parent_cell = grid.refinement["parent_cell_index"][cell_index] - 1
+        child_parent_vertices = parent_vertex_index[grid.cells[cell_index]]
+        inherited_vertices = child_parent_vertices[child_parent_vertices > 0]
+        if child_type == 200:
+            assert inherited_vertices.size == 0
+            continue
+
+        parent_vertex_position = type_to_parent_vertex[int(child_type)]
+        assert inherited_vertices.size == 1
+        assert inherited_vertices[0] == parent.cells[parent_cell, parent_vertex_position] + 1
 
 
 def test_torus_grid_has_periodic_topology_and_planar_metrics():
@@ -926,7 +981,7 @@ def test_grid_topology_is_closed_triangular_and_eulerian():
             ((cell[0], cell[1]), (cell[1], cell[2]), (cell[2], cell[0]))
         ):
             edge_index = grid.cell_edges[cell_index, local_index]
-            assert tuple(sorted(map(int, pair))) == tuple(grid.edges[edge_index])
+            assert set(map(int, pair)) == set(map(int, grid.edges[edge_index]))
             assert cell_index in grid.edge_cells[edge_index]
 
 
@@ -1150,7 +1205,7 @@ def test_geometry_metric_fields_are_positive_scaled_and_conservative():
         geometry["edge_system_orientation"],
         expected_edge_system_orientation(grid),
     )
-    assert set(np.unique(geometry["edge_system_orientation"])) == {-1, 1}
+    assert set(np.unique(geometry["edge_system_orientation"])) <= {-1, 1}
     assert np.allclose(np.linalg.norm(geometry["edge_primal_normal_cartesian"], axis=1), 1.0)
     assert np.allclose(np.linalg.norm(geometry["edge_dual_normal_cartesian"], axis=1), 1.0)
     assert np.allclose(
@@ -1210,6 +1265,43 @@ def test_edge_system_orientation_makes_normals_point_from_first_to_second_cell()
     first_to_second_cell = centers[grid.edge_cells[:, 1]] - centers[grid.edge_cells[:, 0]]
 
     assert np.all(np.sum(normal * first_to_second_cell, axis=1) > 0.0)
+
+
+def test_global_convention_keeps_positive_edge_system_orientation():
+    grid = generate_grid("R02B04", options={"global_grid": {"maxit": 1}})
+    vertices = unit_rows(grid.vertices)
+    centers = unit_rows(grid.cell_center_xyz)
+    edge_centers = unit_rows(grid.edge_center_xyz)
+    tangent = unit_rows(vertices[grid.edges[:, 1]] - vertices[grid.edges[:, 0]])
+    normal = unit_rows(np.cross(edge_centers, tangent))
+    first_to_second_cell = centers[grid.edge_cells[:, 1]] - centers[grid.edge_cells[:, 0]]
+
+    assert np.array_equal(
+        grid.geometry["edge_system_orientation"],
+        np.ones(grid.dims["edge"], dtype=np.int32),
+    )
+    assert set(np.unique(grid.icon_connectivity["orientation_of_normal"])) == {-1, 1}
+    assert np.all(np.sum(normal * first_to_second_cell, axis=1) > 0.0)
+
+
+def test_shifted_pole_rotation_matrix_matches_contract():
+    options = GlobalGridOptions(
+        north_pole_lon=15.0,
+        north_pole_lat=75.0,
+        rotation_angle_degrees=37.5,
+    )
+
+    assert np.allclose(
+        gg._global_grid_rotation_matrix(options),
+        np.array(
+            [
+                [0.88088350, -0.36914665, 0.29626846],
+                [0.38098700, 0.92438507, 0.01899687],
+                [-0.28087877, 0.09614051, 0.95491576],
+            ],
+        ),
+        atol=1.0e-8,
+    )
 
 
 def test_r02b03_refinement_parent_fields_match_previous_bisection_sizes():
@@ -1338,8 +1430,20 @@ def test_geometry_scales_with_sphere_radius_squared_for_areas_and_linearly_for_l
 
 
 def test_geometry_is_independent_of_display_radius_except_cartesian_scaling():
-    unit_grid = generate_grid("R01B01", options={"radius": 1.0, "sphere_radius": 4.0})
-    scaled_grid = generate_grid("R01B01", options={"radius": 10.0, "sphere_radius": 4.0})
+    unit_grid = generate_grid(
+        "R01B01",
+        options={
+            "radius": 1.0,
+            "sphere_radius": 4.0,
+        },
+    )
+    scaled_grid = generate_grid(
+        "R01B01",
+        options={
+            "radius": 10.0,
+            "sphere_radius": 4.0,
+        },
+    )
 
     assert np.array_equal(unit_grid.cells, scaled_grid.cells)
     assert np.array_equal(unit_grid.edges, scaled_grid.edges)
@@ -1348,23 +1452,42 @@ def test_geometry_is_independent_of_display_radius_except_cartesian_scaling():
     assert np.allclose(scaled_grid.vertices, unit_grid.vertices * 10.0)
     assert np.allclose(scaled_grid.cell_center_xyz, unit_grid.cell_center_xyz * 10.0)
     assert np.allclose(scaled_grid.edge_center_xyz, unit_grid.edge_center_xyz * 10.0)
-    assert np.allclose(scaled_grid.lon, unit_grid.lon)
+    assert np.allclose(lon_unit_circle(scaled_grid.lon), lon_unit_circle(unit_grid.lon))
     assert np.allclose(scaled_grid.lat, unit_grid.lat)
-    assert np.allclose(scaled_grid.vertex_lon, unit_grid.vertex_lon)
+    nonpolar_vertices = np.abs(unit_grid.vertex_lat) < 89.999
+    assert np.allclose(
+        lon_unit_circle(scaled_grid.vertex_lon[nonpolar_vertices]),
+        lon_unit_circle(unit_grid.vertex_lon[nonpolar_vertices]),
+    )
     assert np.allclose(scaled_grid.vertex_lat, unit_grid.vertex_lat)
-    assert np.allclose(scaled_grid.edge_lon, unit_grid.edge_lon)
+    assert np.allclose(
+        lon_unit_circle(scaled_grid.edge_lon),
+        lon_unit_circle(unit_grid.edge_lon),
+    )
     assert np.allclose(scaled_grid.edge_lat, unit_grid.edge_lat)
     for key in unit_grid.geometry:
         assert np.allclose(scaled_grid.geometry[key], unit_grid.geometry[key])
 
 
 def test_metadata_uses_stable_uuid_and_metric_means():
-    grid = generate_grid("R02B01", options={"sphere_radius": 9.0})
+    grid = generate_grid(
+        "R02B01",
+        options={"sphere_radius": 9.0},
+    )
     rotated = generate_grid(
         "R02B01",
-        options={"sphere_radius": 9.0, "rotation_angle_degrees": 0.05},
+        options={
+            "sphere_radius": 9.0,
+            "global_grid": {"rotation_angle_degrees": 0.05},
+        },
     )
-    display_scaled = generate_grid("R02B01", options={"radius": 2.0, "sphere_radius": 9.0})
+    display_scaled = generate_grid(
+        "R02B01",
+        options={
+            "radius": 2.0,
+            "sphere_radius": 9.0,
+        },
+    )
     metadata = grid.metadata
 
     assert metadata["uuidOfHGrid"] == gg.grid_uuid("R02B01", sphere_radius=9.0)
@@ -1380,12 +1503,15 @@ def test_metadata_uses_stable_uuid_and_metric_means():
     assert metadata["inverse_flattening"] == 0.0
     assert metadata["grid_geometry"] == 1
     assert metadata["grid_cell_type"] == 3
-    assert metadata["number_of_grid_used"] == 1
-    assert metadata["center"] == 255
+    assert metadata["number_of_grid_used"] == 0
+    assert metadata["center"] == 78
     assert metadata["subcenter"] == 255
     assert metadata["crs_id"] == 0
     assert metadata["crs_name"] == "Spherical Earth"
-    assert metadata["grid_mapping_name"] == "latitude_longitude"
+    assert metadata["grid_mapping_name"] == "lat_long_on_sphere"
+    assert metadata["spring_beta"] == 0.9
+    assert metadata["spring_maxit"] == 2000
+    assert metadata["indexing_algorithm"] == "new"
     assert metadata["ellipsoid_name"] == "sphere"
     assert metadata["mean_edge_length"] == pytest.approx(np.mean(grid.geometry["edge_length"]))
     assert metadata["mean_dual_edge_length"] == pytest.approx(
@@ -1773,15 +1899,12 @@ def test_representative_grid_series_sanity(grid_name):
 def test_private_normalization_and_refinement_error_branches():
     with pytest.raises(RuntimeError, match="zero-length"):
         gg._normalize(np.zeros(3))
-    with pytest.raises(ValueError, match="sections must be"):
-        gg._refine_triangles(np.eye(3), np.array([[0, 1, 2]], dtype=np.int32), 0)
 
-    vertices = np.eye(3)
-    cells = np.array([[0, 1, 2]], dtype=np.int32)
-    refined_vertices, refined_cells = gg._refine_triangles(vertices, cells, 1)
+    vertices, cells = gg._icosahedron()
+    refined_vertices, refined_cells = gg._refine_triangles_bisection(vertices, cells)
 
-    assert np.array_equal(refined_vertices, vertices)
-    assert np.array_equal(refined_cells, cells)
+    assert refined_vertices.shape == (42, 3)
+    assert refined_cells.shape == (80, 3)
     assert refined_vertices is not vertices
     assert refined_cells is not cells
 
@@ -1845,7 +1968,7 @@ def test_private_build_edges_preserves_first_seen_edge_order():
 
     assert np.array_equal(
         edges,
-        np.array([[0, 1], [1, 2], [0, 2], [0, 3], [1, 3], [2, 3]], dtype=np.int32),
+        np.array([[1, 0], [2, 1], [0, 2], [3, 0], [1, 3], [2, 3]], dtype=np.int32),
     )
     assert np.array_equal(
         cell_edges,

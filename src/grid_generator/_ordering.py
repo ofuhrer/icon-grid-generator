@@ -12,9 +12,9 @@ from ._types import GeometryData
 
 CHILD_ORDER = {
     200: 0,
-    201: 1,
-    202: 2,
-    203: 3,
+    203: 1,
+    201: 2,
+    202: 3,
 }
 
 

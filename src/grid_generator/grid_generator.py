@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import getpass
-from math import sqrt
 from pathlib import Path
 import platform
 from typing import Any, Mapping
@@ -27,6 +26,7 @@ from ._limited_area import LimitedAreaExtractor
 from ._metrics import SphericalMetricsBuilder
 from ._optimization import (
     GlobalOptimizationOptions,
+    GlobalGridOptions,
     optimize_global_grid,
     resolve_global_optimization_options,
 )
@@ -45,7 +45,7 @@ from ._torus import (
     PlanarTorusMetricsBuilder,
     TorusRefinementBuilder,
 )
-from ._types import BisectionProvenance, GeometryData
+from ._types import BisectionProvenance, GeometryData, TopologyData
 from ._validation import finite_float_option, validate_grid_options
 from . import _accelerated
 
@@ -756,19 +756,45 @@ class IconGridOptions:
 
     max_cells: int | None = 2_000_000
     accelerator: str = "auto"
+    global_grid: GlobalGridOptions = field(default_factory=GlobalGridOptions)
     global_optimization: GlobalOptimizationOptions = field(
-        default_factory=GlobalOptimizationOptions
+        default_factory=lambda: GlobalOptimizationOptions(
+            method="spring",
+            iterations=2000,
+        )
     )
     radius: float = 1.0
     sphere_radius: float = EARTH_RADIUS_M
-    rotation_axis: tuple[float, float, float] = (1.0, 0.0, 0.0)
-    rotation_angle_degrees: float = 0.0
 
     def __post_init__(self) -> None:
+        global_grid = self.global_grid
+        if isinstance(global_grid, Mapping):
+            global_grid = GlobalGridOptions(**dict(global_grid))
+        if not isinstance(global_grid, GlobalGridOptions):
+            raise TypeError("global_grid must be a GlobalGridOptions instance or mapping")
+        object.__setattr__(
+            self,
+            "global_grid",
+            global_grid,
+        )
+        global_optimization = resolve_global_optimization_options(self.global_optimization)
+        if (
+            global_optimization.method == "spring"
+            and global_optimization.iterations == 2000
+        ):
+            global_optimization = GlobalOptimizationOptions(
+                method="spring",
+                iterations=global_grid.maxit,
+            )
+        if (
+            global_optimization.method == "none"
+            and global_optimization.iterations == 2000
+        ):
+            global_optimization = GlobalOptimizationOptions(method="none", iterations=0)
         object.__setattr__(
             self,
             "global_optimization",
-            resolve_global_optimization_options(self.global_optimization),
+            global_optimization,
         )
 
 
@@ -902,6 +928,22 @@ def generate_grid(
     if not isinstance(grid_spec, _SUPPORTED_GRID_SPEC_TYPES):
         raise TypeError("spec must be an ICON R<n>B<k> string or a supported grid spec")
     resolved_options = _resolve_options(options)
+    explicit_global_optimization = (
+        isinstance(options, Mapping) and "global_optimization" in options
+    )
+    if (
+        not isinstance(grid_spec, GlobalGridSpec)
+        and resolved_options.global_optimization.method == "spring"
+        and not explicit_global_optimization
+    ):
+        resolved_options = IconGridOptions(
+            max_cells=resolved_options.max_cells,
+            accelerator=resolved_options.accelerator,
+            global_grid=resolved_options.global_grid,
+            global_optimization=GlobalOptimizationOptions(method="none"),
+            radius=resolved_options.radius,
+            sphere_radius=resolved_options.sphere_radius,
+        )
     _validate_options(grid_spec, resolved_options)
 
     if isinstance(grid_spec, TorusGridSpec):
@@ -1039,6 +1081,13 @@ def _generate_grid(
     geometry = SphericalIcosahedralGeometry().build(spec, options)
     geometry = IconOrderingBuilder(context).order_spherical_bisection(spec, options, geometry)
     topology = GlobalTopologyBuilder().build(spec, options, geometry)
+    topology = _adjust_global_edge_orientation(
+        spec,
+        options,
+        geometry,
+        topology,
+        context,
+    )
     metrics = SphericalMetricsBuilder().build(options, geometry, topology)
     refinement = GlobalRefinementBuilder(context).build(spec, options, geometry, topology)
     metadata = _metadata(spec, options, metrics.fields)
@@ -1072,6 +1121,118 @@ def _generate_grid(
         grid = optimize_global_grid(grid, options.global_optimization)
     context.grids[cache_key] = grid
     return grid
+
+
+def _adjust_global_edge_orientation(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    geometry: GeometryData,
+    topology: TopologyData,
+    context: _GlobalGenerationContext,
+) -> TopologyData:
+    if spec.bisections == 0:
+        return topology
+    parent_spec = GlobalGridSpec(root=spec.root, bisections=spec.bisections - 1)
+    parent = _generate_grid(parent_spec, options, context)
+    provenance = geometry.bisection_provenance
+    if provenance is None:
+        parent_vertex_index = _parent_vertex_indices(geometry.vertices, parent)
+        parent_for_mapping: IconGrid | _GlobalParentData | BisectionProvenance = parent
+        parent_normals = parent.geometry["edge_primal_normal_cartesian"]
+    else:
+        parent_vertex_index = provenance.parent_vertex_index
+        parent_for_mapping = provenance
+        parent_vertex_count = int(np.max(parent_vertex_index[parent_vertex_index > 0]))
+        provenance_edge_centers = _edge_centers(
+            geometry.vertices[:parent_vertex_count],
+            provenance.edges,
+            options.radius,
+        )
+        parent_edge_map = _nearest_unit_point_indices(
+            provenance_edge_centers,
+            parent.edge_center_xyz,
+        )
+        parent_normals = parent.geometry["edge_primal_normal_cartesian"][parent_edge_map]
+    parent_edge_index, _ = _parent_edge_fields(
+        topology.edges,
+        parent_vertex_index,
+        parent_for_mapping,
+        options.accelerator,
+    )
+
+    edge_system_orientation = _edge_system_orientation(
+        geometry.vertices,
+        geometry.cell_center_xyz,
+        topology.edges,
+        topology.edge_cells,
+        topology.edge_center_xyz,
+    )
+    child_normals = _edge_normal_fields(
+        geometry.vertices,
+        topology.edges,
+        topology.edge_center_xyz,
+        edge_system_orientation,
+    )["edge_primal_normal_cartesian"]
+    alignment = np.sum(
+        child_normals * parent_normals[parent_edge_index.astype(np.int64) - 1],
+        axis=1,
+    )
+    flip = alignment < 0.0
+    if not np.any(flip):
+        return topology
+
+    edges = topology.edges.copy()
+    edge_cells = topology.edge_cells.copy()
+    edges[flip] = edges[flip][:, ::-1]
+    edge_cells[flip] = edge_cells[flip][:, ::-1]
+
+    edge_center_xyz = _edge_centers(geometry.vertices, edges, options.radius)
+    edge_lon, edge_lat = _lon_lat(edge_center_xyz)
+    icon_connectivity = _icon_connectivity(
+        geometry.vertices,
+        geometry.cells,
+        geometry.cell_center_xyz,
+        edges,
+        topology.cell_edges,
+        edge_cells,
+    )
+    return TopologyData(
+        edges=edges,
+        cell_edges=topology.cell_edges,
+        edge_cells=edge_cells,
+        edge_center_xyz=edge_center_xyz,
+        edge_lon=edge_lon,
+        edge_lat=edge_lat,
+        icon_connectivity=icon_connectivity,
+        connectivity=_public_connectivity(
+            geometry.cells,
+            edges,
+            edge_cells,
+            icon_connectivity,
+        ),
+        neighbor_tables=_neighbor_tables(
+            geometry.cells,
+            edges,
+            edge_cells,
+            icon_connectivity,
+        ),
+        source_edge_index=topology.source_edge_index,
+    )
+
+
+def _nearest_unit_point_indices(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    unit_source = _normalize_rows(source)
+    unit_target = _normalize_rows(target)
+    block_size = 1024
+    indices = np.empty(unit_source.shape[0], dtype=np.int64)
+    for start in range(0, unit_source.shape[0], block_size):
+        stop = min(start + block_size, unit_source.shape[0])
+        distances = np.sum(
+            (unit_source[start:stop, np.newaxis, :] - unit_target[np.newaxis, :, :]) ** 2,
+            axis=2,
+        )
+        indices[start:stop] = np.argmin(distances, axis=1)
+    return indices
 
 
 def _parent_grid(
@@ -1266,51 +1427,192 @@ def cut_grid(grid: IconGrid, spec: CutGridSpec) -> IconGrid:
 
 
 def _icosahedron() -> tuple[np.ndarray, np.ndarray]:
-    phi = (1.0 + sqrt(5.0)) / 2.0
+    z = 1.0 / np.sqrt(5.0)
+    x_major = 2.0 / np.sqrt(5.0)
+    x_minor = (np.sqrt(5.0) - 1.0) / (2.0 * np.sqrt(5.0))
+    x_mid = (1.0 + np.sqrt(5.0)) / (2.0 * np.sqrt(5.0))
+    y_mid = np.sqrt((5.0 - np.sqrt(5.0)) / 10.0)
+    y_major = np.sqrt((5.0 + np.sqrt(5.0)) / 10.0)
     vertices = np.asarray(
         [
-            (-1.0, phi, 0.0),
-            (1.0, phi, 0.0),
-            (-1.0, -phi, 0.0),
-            (1.0, -phi, 0.0),
-            (0.0, -1.0, phi),
-            (0.0, 1.0, phi),
-            (0.0, -1.0, -phi),
-            (0.0, 1.0, -phi),
-            (phi, 0.0, -1.0),
-            (phi, 0.0, 1.0),
-            (-phi, 0.0, -1.0),
-            (-phi, 0.0, 1.0),
+            (0.0, 0.0, 1.0),
+            (-x_major, 0.0, z),
+            (x_major, 0.0, -z),
+            (0.0, 0.0, -1.0),
+            (x_mid, -y_mid, z),
+            (x_mid, y_mid, z),
+            (-x_mid, -y_mid, -z),
+            (-x_mid, y_mid, -z),
+            (-x_minor, -y_major, z),
+            (-x_minor, y_major, z),
+            (x_minor, -y_major, -z),
+            (x_minor, y_major, -z),
         ],
         dtype=np.float64,
     )
-    vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis]
     faces = np.asarray(
         [
-            (0, 11, 5),
-            (0, 5, 1),
-            (0, 1, 7),
-            (0, 7, 10),
-            (0, 10, 11),
-            (1, 5, 9),
-            (5, 11, 4),
-            (11, 10, 2),
-            (10, 7, 6),
-            (7, 1, 8),
-            (3, 9, 4),
-            (3, 4, 2),
-            (3, 2, 6),
-            (3, 6, 8),
-            (3, 8, 9),
-            (4, 9, 5),
-            (2, 4, 11),
-            (6, 2, 10),
-            (8, 6, 7),
-            (9, 8, 1),
+            (1, 2, 9),
+            (1, 9, 5),
+            (1, 5, 6),
+            (1, 6, 10),
+            (1, 10, 2),
+            (2, 7, 9),
+            (9, 7, 11),
+            (9, 11, 5),
+            (5, 11, 3),
+            (5, 3, 6),
+            (6, 3, 12),
+            (6, 12, 10),
+            (10, 12, 8),
+            (10, 8, 2),
+            (2, 8, 7),
+            (4, 7, 8),
+            (4, 8, 12),
+            (4, 12, 3),
+            (4, 3, 11),
+            (4, 11, 7),
         ],
         dtype=np.int32,
-    )
+    ) - 1
     return vertices, faces
+
+
+def _sadourny_root_grid(root: int) -> tuple[np.ndarray, np.ndarray, BisectionProvenance | None]:
+    if root < 1:
+        raise ValueError("root must be at least 1")
+    if root == 1:
+        vertices, cells = _icosahedron()
+        return vertices, cells, None
+
+    base_vertices, base_faces = _icosahedron()
+    vertices: list[np.ndarray] = [point.copy() for point in base_vertices]
+    directed_edge_vertices: dict[tuple[int, int], list[int]] = {}
+
+    def subdivide(first: int, second: int) -> list[int]:
+        key = (first, second)
+        existing = directed_edge_vertices.get(key)
+        if existing is not None:
+            return existing
+
+        reverse_key = (second, first)
+        reverse = directed_edge_vertices.get(reverse_key)
+        if reverse is not None:
+            values = list(reversed(reverse))
+            directed_edge_vertices[key] = values
+            return values
+
+        values = [first]
+        for cut in range(1, root):
+            point = (root - cut) * base_vertices[first] + cut * base_vertices[second]
+            values.append(len(vertices))
+            vertices.append(_normalize(point))
+        values.append(second)
+        directed_edge_vertices[key] = values
+        directed_edge_vertices[reverse_key] = list(reversed(values))
+        return values
+
+    vertex_neighbors: dict[int, dict[int, int]] = {}
+    edges: list[tuple[int, int]] = []
+    cell_edges: list[tuple[int, int, int]] = []
+
+    def edge_index(first: int, second: int) -> int:
+        neighbors = vertex_neighbors.setdefault(first, {})
+        existing = neighbors.get(second)
+        if existing is not None:
+            return existing
+
+        index = len(edges)
+        edges.append((first, second))
+        neighbors[second] = index
+        vertex_neighbors.setdefault(second, {})[first] = index
+        return index
+
+    for face in base_faces:
+        a, b, c = map(int, face)
+        v0 = [a] + [-1] * root
+        for row in range(1, root + 1):
+            if row == 1:
+                v1 = [subdivide(a, b)[row], subdivide(a, c)[row]] + [-1] * (root - 1)
+            elif row == root:
+                v1 = subdivide(b, c).copy()
+            else:
+                left = subdivide(a, b)[row]
+                right = subdivide(a, c)[row]
+                row_vertices = [left]
+                for cut in range(1, row):
+                    point = (row - cut) * vertices[left] + cut * vertices[right]
+                    row_vertices.append(len(vertices))
+                    vertices.append(_normalize(point))
+                row_vertices.append(right)
+                v1 = row_vertices + [-1] * (root - row)
+
+            new_edge_indices: list[int] = []
+            for index in range(row):
+                new_edge_indices.extend(
+                    [
+                        edge_index(v0[index], v1[index]),
+                        edge_index(v1[index], v1[index + 1]),
+                        edge_index(v1[index + 1], v0[index]),
+                    ]
+                )
+            for index in range(row - 1):
+                new_edge_indices.extend(
+                    [
+                        edge_index(v0[index], v0[index + 1]),
+                        edge_index(v0[index + 1], v1[index + 1]),
+                        edge_index(v1[index + 1], v0[index]),
+                    ]
+                )
+            cell_edges.extend(
+                tuple(new_edge_indices[index : index + 3])
+                for index in range(0, len(new_edge_indices), 3)
+            )
+            v0 = v1
+
+    vertex_array = _normalize_rows(np.asarray(vertices, dtype=np.float64))
+    edge_array = np.asarray(edges, dtype=np.int32)
+    cell_edge_array = np.asarray(cell_edges, dtype=np.int32)
+    cell_array = _cells_from_edge_cells(vertex_array, edge_array, cell_edge_array)
+    edge_cell_array = _edge_cells_from_cell_edges(cell_edge_array, edge_array.shape[0])
+    edge_array = _edge_vertices_from_cell_edges(cell_array, cell_edge_array, edge_cell_array)
+    provenance = BisectionProvenance(
+        cells=np.empty((0, 3), dtype=np.int32),
+        edges=np.empty((0, 2), dtype=np.int32),
+        cell_edges=np.empty((0, 3), dtype=np.int32),
+        parent_vertex_index=np.zeros(vertex_array.shape[0], dtype=np.int32),
+        parent_cell_index=np.zeros(cell_array.shape[0], dtype=np.int32),
+        parent_cell_type=np.zeros(cell_array.shape[0], dtype=np.int32),
+        child_edges=edge_array,
+        child_cell_edges=cell_edge_array,
+        child_edge_cells=edge_cell_array,
+    )
+    return vertex_array, cell_array, provenance
+
+
+def _cells_from_edge_cells(
+    vertices: np.ndarray,
+    edges: np.ndarray,
+    cell_edges: np.ndarray,
+) -> np.ndarray:
+    cells = np.empty_like(cell_edges)
+    for cell_index, edge_indices in enumerate(cell_edges):
+        cell_vertices = np.empty(3, dtype=np.int32)
+        for local_index, edge_index in enumerate(edge_indices):
+            previous = edge_indices[local_index - 1]
+            previous_edge = edges[previous]
+            first, second = edges[edge_index]
+            if first in previous_edge:
+                cell_vertices[local_index] = first
+            elif second in previous_edge:
+                cell_vertices[local_index] = second
+            else:
+                raise RuntimeError("cell edges do not share a vertex")
+        if _orient_cell(tuple(map(int, cell_vertices)), vertices) != tuple(cell_vertices):
+            cell_vertices[[0, 1]] = cell_vertices[[1, 0]]
+            cell_edges[cell_index, [1, 2]] = cell_edges[cell_index, [2, 1]]
+        cells[cell_index] = cell_vertices
+    return cells
 
 
 def _normalize(point: np.ndarray) -> np.ndarray:
@@ -1335,16 +1637,126 @@ def _rotate_points(
     """Rotate Cartesian sphere points around `axis` by `angle_degrees`."""
     if angle_degrees == 0.0:
         return points.copy()
-    rotation_axis = np.asarray(axis, dtype=np.float64)
-    rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+    axis_vector = np.asarray(axis, dtype=np.float64)
+    axis_vector = axis_vector / np.linalg.norm(axis_vector)
     angle = np.radians(angle_degrees)
     cos_angle = np.cos(angle)
     sin_angle = np.sin(angle)
-    cross = np.cross(rotation_axis, points)
-    projection = np.sum(points * rotation_axis, axis=1)[:, np.newaxis] * rotation_axis
+    cross = np.cross(axis_vector, points)
+    projection = np.sum(points * axis_vector, axis=1)[:, np.newaxis] * axis_vector
     rotated = points * cos_angle + cross * sin_angle + projection * (1.0 - cos_angle)
     return _normalize_rows(rotated)
 
+
+def _apply_global_grid_rotation(points: np.ndarray, options: GlobalGridOptions) -> np.ndarray:
+    """Apply compatible pole placement and north-pole rotation."""
+
+    if (
+        options.north_pole_lon == 0.0
+        and options.north_pole_lat == 90.0
+        and options.rotation_angle_degrees == 0.0
+    ):
+        return points.copy()
+    matrix = _global_grid_rotation_matrix(options)
+    return _normalize_rows(points @ matrix.T)
+
+
+def _global_grid_rotation_matrix(options: GlobalGridOptions) -> np.ndarray:
+    default = _global_grid_seed_vertices(GlobalGridOptions())
+    target = _global_grid_seed_vertices(options)
+    u, _, vt = np.linalg.svd(default.T @ target)
+    matrix = vt.T @ u.T
+    if np.linalg.det(matrix) < 0.0:
+        vt[-1] *= -1.0
+        matrix = vt.T @ u.T
+    return matrix
+
+
+def _global_grid_seed_vertices(options: GlobalGridOptions) -> np.ndarray:
+    phi = (1.0 + np.sqrt(5.0)) / 2.0
+    vertices = _normalize_rows(
+        np.asarray(
+            [
+                (0.0, 1.0, phi),
+                (0.0, -1.0, phi),
+                (0.0, 1.0, -phi),
+                (0.0, -1.0, -phi),
+                (1.0, phi, 0.0),
+                (-1.0, phi, 0.0),
+                (1.0, -phi, 0.0),
+                (-1.0, -phi, 0.0),
+                (phi, 0.0, 1.0),
+                (-phi, 0.0, 1.0),
+                (phi, 0.0, -1.0),
+                (-phi, 0.0, -1.0),
+            ],
+            dtype=np.float64,
+        )
+    )
+    first = vertices[0]
+    first_lon = np.degrees(np.arctan2(first[1], first[0]))
+    first_lat = np.degrees(np.arcsin(np.clip(first[2], -1.0, 1.0)))
+    rotated = _unrotate_latlon(vertices, first_lon, first_lat)
+    return _raw_global_grid_rotation(rotated, options)
+
+
+def _raw_global_grid_rotation(points: np.ndarray, options: GlobalGridOptions) -> np.ndarray:
+    rotated = _unrotate_latlon(
+        points,
+        options.north_pole_lon,
+        options.north_pole_lat,
+    )
+    if options.rotation_angle_degrees != 0.0:
+        target = np.array(
+            [
+                np.cos(np.radians(options.north_pole_lat))
+                * np.cos(np.radians(options.north_pole_lon)),
+                np.cos(np.radians(options.north_pole_lat))
+                * np.sin(np.radians(options.north_pole_lon)),
+                np.sin(np.radians(options.north_pole_lat)),
+            ],
+            dtype=np.float64,
+        )
+        rotated = _rotate_points(rotated, tuple(target), options.rotation_angle_degrees)
+    return rotated
+
+
+def _unrotate_latlon(
+    points: np.ndarray,
+    pole_lon_degrees: float,
+    pole_lat_degrees: float,
+) -> np.ndarray:
+    unit_points = _normalize_rows(points)
+    lon = np.arctan2(unit_points[:, 1], unit_points[:, 0])
+    lat = np.arcsin(np.clip(unit_points[:, 2], -1.0, 1.0))
+    pole_lon = np.radians(pole_lon_degrees)
+    pole_lat = np.radians(pole_lat_degrees)
+    lon_delta = lon - pole_lon
+    lon_numerator = -np.sin(lon_delta) * np.cos(lat)
+    lon_denominator = (
+        -np.sin(pole_lat) * np.cos(lat) * np.cos(lon_delta)
+        + np.cos(pole_lat) * np.sin(lat)
+    )
+    rotated_lon = np.where(
+        np.abs(lon_denominator) > 1.0e-15,
+        np.arctan2(lon_numerator, lon_denominator),
+        0.0,
+    )
+    rotated_lat = np.arcsin(
+        np.clip(
+            np.sin(lat) * np.sin(pole_lat)
+            + np.cos(lat) * np.cos(pole_lat) * np.cos(lon_delta),
+            -1.0,
+            1.0,
+        )
+    )
+    return np.column_stack(
+        (
+            np.cos(rotated_lat) * np.cos(rotated_lon),
+            np.cos(rotated_lat) * np.sin(rotated_lon),
+            np.sin(rotated_lat),
+        )
+    )
 
 def _orient_cell(cell: tuple[int, int, int], vertices: Any) -> tuple[int, int, int]:
     a, b, c = (vertices[index] for index in cell)
@@ -1352,100 +1764,6 @@ def _orient_cell(cell: tuple[int, int, int], vertices: Any) -> tuple[int, int, i
     if np.dot(normal, a + b + c) < 0:
         return (cell[0], cell[2], cell[1])
     return cell
-
-
-def _refine_triangles(
-    vertices: np.ndarray,
-    cells: np.ndarray,
-    sections: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    if sections < 1:
-        raise ValueError("sections must be at least 1")
-    if sections == 1:
-        return vertices.copy(), cells.copy()
-    if sections == 2:
-        return _refine_triangles_bisection(vertices, cells)
-
-    new_vertices: list[np.ndarray] = []
-    old_vertex_ids: dict[int, int] = {}
-    edge_vertex_ids: dict[tuple[int, int, int], int] = {}
-    interior_vertex_ids: dict[tuple[int, int, int], int] = {}
-    new_cells: list[tuple[int, int, int]] = []
-
-    def old_vertex_id(vertex: int) -> int:
-        existing_id = old_vertex_ids.get(vertex)
-        if existing_id is not None:
-            return existing_id
-
-        new_id = len(new_vertices)
-        old_vertex_ids[vertex] = new_id
-        new_vertices.append(vertices[vertex])
-        return new_id
-
-    def edge_vertex_id(first: int, second: int, cut_from_first: int) -> int:
-        low, high = sorted((first, second))
-        canonical_cut = cut_from_first if first == low else sections - cut_from_first
-        key = (low, high, canonical_cut)
-        existing_id = edge_vertex_ids.get(key)
-        if existing_id is not None:
-            return existing_id
-
-        point = (
-            (sections - cut_from_first) * vertices[first]
-            + cut_from_first * vertices[second]
-        ) / sections
-        new_id = len(new_vertices)
-        edge_vertex_ids[key] = new_id
-        new_vertices.append(point)
-        return new_id
-
-    def interior_vertex_id(cell_index: int, a: int, b: int, c: int, i: int, j: int) -> int:
-        key = (cell_index, i, j)
-        existing_id = interior_vertex_ids.get(key)
-        if existing_id is not None:
-            return existing_id
-
-        k = sections - i - j
-        point = (k * vertices[a] + i * vertices[b] + j * vertices[c]) / sections
-        new_id = len(new_vertices)
-        interior_vertex_ids[key] = new_id
-        new_vertices.append(point)
-        return new_id
-
-    for cell_index, (a, b, c) in enumerate(cells):
-        a = int(a)
-        b = int(b)
-        c = int(c)
-
-        def node(i: int, j: int) -> int:
-            k = sections - i - j
-            if i == 0 and j == 0:
-                return old_vertex_id(a)
-            if i == sections and j == 0:
-                return old_vertex_id(b)
-            if i == 0 and j == sections:
-                return old_vertex_id(c)
-            if j == 0:
-                return edge_vertex_id(a, b, i)
-            if i == 0:
-                return edge_vertex_id(a, c, j)
-            if k == 0:
-                return edge_vertex_id(b, c, j)
-            return interior_vertex_id(cell_index, a, b, c, i, j)
-
-        for i in range(sections):
-            for j in range(sections - i):
-                first = (node(i, j), node(i + 1, j), node(i, j + 1))
-                new_cells.append(_orient_cell(first, new_vertices))
-
-                if j < sections - i - 1:
-                    second = (node(i + 1, j), node(i + 1, j + 1), node(i, j + 1))
-                    new_cells.append(_orient_cell(second, new_vertices))
-
-    return (
-        _normalize_rows(np.asarray(new_vertices, dtype=np.float64)),
-        np.asarray(new_cells, dtype=np.int32),
-    )
 
 
 def _refine_triangles_bisection(
@@ -1465,34 +1783,78 @@ def _refine_triangles_bisection_with_provenance(
     cells: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, BisectionProvenance]:
     """Split triangles into ICON-ordered bisection children and provenance."""
-    edge_vertices, cell_edges = _cell_edge_indices(cells)
+    edge_vertices, cell_edges, _ = _build_edges(cells)
     old_vertex_count = vertices.shape[0]
+    old_edge_count = edge_vertices.shape[0]
+    old_cell_count = cells.shape[0]
     edge_midpoint_index = (
-        old_vertex_count + np.arange(edge_vertices.shape[0], dtype=np.int32)
+        old_vertex_count + np.arange(old_edge_count, dtype=np.int32)
     )
     midpoint_vertices = 0.5 * (
         vertices[edge_vertices[:, 0]] + vertices[edge_vertices[:, 1]]
     )
     new_vertices = np.vstack((vertices, midpoint_vertices))
 
-    ab = edge_midpoint_index[cell_edges[:, 0]]
-    bc = edge_midpoint_index[cell_edges[:, 1]]
-    ca = edge_midpoint_index[cell_edges[:, 2]]
-    a = cells[:, 0]
-    b = cells[:, 1]
-    c = cells[:, 2]
-
-    new_cells = np.empty((cells.shape[0] * 4, 3), dtype=np.int32)
-    new_cells[0::4] = np.column_stack((a, ab, ca))
-    new_cells[1::4] = np.column_stack((ab, bc, ca))
-    new_cells[2::4] = np.column_stack((ca, bc, c))
-    new_cells[3::4] = np.column_stack((ab, b, bc))
-    new_cells = _orient_cells_outward(new_cells, new_vertices)
-    child_order = (
-        np.repeat(np.arange(cells.shape[0], dtype=np.int32) * 4, 4)
-        + np.tile(np.array([1, 0, 3, 2], dtype=np.int32), cells.shape[0])
+    new_cell_count = old_cell_count * 4
+    new_edge_count = old_edge_count * 2 + old_cell_count * 3
+    new_cells = np.empty((new_cell_count, 3), dtype=np.int32)
+    raw_cell_edges = np.empty((new_cell_count, 3), dtype=np.int32)
+    new_edges = np.empty((new_edge_count, 2), dtype=np.int32)
+    split_edge_index = (
+        2 * np.arange(old_edge_count, dtype=np.int32)[:, np.newaxis]
+        + np.array([0, 1], dtype=np.int32)
     )
-    new_cells = new_cells[child_order]
+    inner_edge_index = (
+        2 * old_edge_count
+        + 3 * np.arange(old_cell_count, dtype=np.int32)[:, np.newaxis]
+        + np.array([0, 1, 2], dtype=np.int32)
+    )
+
+    for edge_index, (first, second) in enumerate(edge_vertices):
+        midpoint = edge_midpoint_index[edge_index]
+        new_edges[split_edge_index[edge_index, 0]] = (first, midpoint)
+        new_edges[split_edge_index[edge_index, 1]] = (midpoint, second)
+
+    edge_pairs_by_vertex = ((0, 1, 2), (1, 2, 0), (2, 0, 1))
+    child_slot_by_vertex = np.array([2, 3, 1], dtype=np.int32)
+    for cell_index, cell in enumerate(cells):
+        parent_edges = cell_edges[cell_index]
+        midpoints = edge_midpoint_index[parent_edges]
+        center_cell = 4 * cell_index
+        new_cells[center_cell] = midpoints
+        raw_cell_edges[center_cell] = inner_edge_index[cell_index]
+
+        for first_edge_pos, second_edge_pos, opposite_edge_pos in edge_pairs_by_vertex:
+            first_edge = parent_edges[first_edge_pos]
+            second_edge = parent_edges[second_edge_pos]
+            common_vertex = _common_edge_vertex(edge_vertices[first_edge], edge_vertices[second_edge])
+            vertex_pos = _local_vertex_position(cell, common_vertex)
+            child_cell = center_cell + int(child_slot_by_vertex[vertex_pos])
+            first_split_slot = _edge_endpoint_slot(edge_vertices[first_edge], common_vertex)
+            second_split_slot = _edge_endpoint_slot(edge_vertices[second_edge], common_vertex)
+            first_midpoint = edge_midpoint_index[first_edge]
+            second_midpoint = edge_midpoint_index[second_edge]
+
+            new_cells[child_cell] = (first_midpoint, common_vertex, second_midpoint)
+            raw_cell_edges[child_cell] = (
+                split_edge_index[first_edge, first_split_slot],
+                split_edge_index[second_edge, second_split_slot],
+                inner_edge_index[cell_index, vertex_pos],
+            )
+            new_edges[inner_edge_index[cell_index, vertex_pos]] = (
+                first_midpoint,
+                second_midpoint,
+            )
+
+    raw_edge_cells = _edge_cells_from_cell_edges(raw_cell_edges, new_edge_count)
+    new_edges = _edge_vertices_from_cell_edges(new_cells, raw_cell_edges, raw_edge_cells)
+    new_cells, new_cell_edges = _order_cells_by_edges(
+        new_vertices,
+        new_cells,
+        new_edges,
+        raw_cell_edges,
+        raw_edge_cells,
+    )
 
     parent_vertex_index = np.empty(new_vertices.shape[0], dtype=np.int32)
     parent_vertex_index[:old_vertex_count] = np.arange(
@@ -1502,20 +1864,20 @@ def _refine_triangles_bisection_with_provenance(
     )
     parent_vertex_index[old_vertex_count:] = -np.arange(
         1,
-        edge_vertices.shape[0] + 1,
+        old_edge_count + 1,
         dtype=np.int32,
     )
     parent_cell_index = np.repeat(
-        np.arange(1, cells.shape[0] + 1, dtype=np.int32),
+        np.arange(1, old_cell_count + 1, dtype=np.int32),
         4,
     )
     parent_cell_type = np.tile(
         np.array(
             [
                 CHILD_CELL_TYPE_CENTER,
+                CHILD_CELL_TYPE_AT_VERTEX_2,
                 CHILD_CELL_TYPE_AT_VERTEX_0,
                 CHILD_CELL_TYPE_AT_VERTEX_1,
-                CHILD_CELL_TYPE_AT_VERTEX_2,
             ],
             dtype=np.int32,
         ),
@@ -1528,6 +1890,9 @@ def _refine_triangles_bisection_with_provenance(
         parent_vertex_index=parent_vertex_index,
         parent_cell_index=parent_cell_index,
         parent_cell_type=parent_cell_type,
+        child_edges=new_edges,
+        child_cell_edges=new_cell_edges,
+        child_edge_cells=raw_edge_cells,
     )
     return (
         _normalize_rows(new_vertices.astype(np.float64, copy=False)),
@@ -1536,35 +1901,132 @@ def _refine_triangles_bisection_with_provenance(
     )
 
 
+def _common_edge_vertex(first_edge: np.ndarray, second_edge: np.ndarray) -> int:
+    common = set(map(int, first_edge)) & set(map(int, second_edge))
+    if len(common) != 1:
+        raise RuntimeError("parent cell edges do not share exactly one vertex")
+    return common.pop()
+
+
+def _local_vertex_position(cell: np.ndarray, vertex: int) -> int:
+    matches = np.flatnonzero(cell == vertex)
+    if matches.size != 1:
+        raise RuntimeError("parent vertex is not present exactly once in parent cell")
+    return int(matches[0])
+
+
+def _edge_endpoint_slot(edge: np.ndarray, vertex: int) -> int:
+    if int(edge[0]) == vertex:
+        return 0
+    if int(edge[1]) == vertex:
+        return 1
+    raise RuntimeError("vertex is not an endpoint of parent edge")
+
+
+def _edge_cells_from_cell_edges(cell_edges: np.ndarray, edge_count: int) -> np.ndarray:
+    edge_cells = np.full((edge_count, 2), -1, dtype=np.int32)
+    for cell_index, edges in enumerate(cell_edges):
+        for edge_index in edges:
+            if edge_cells[edge_index, 0] < 0:
+                edge_cells[edge_index, 0] = cell_index
+            elif edge_cells[edge_index, 1] < 0:
+                first = int(edge_cells[edge_index, 0])
+                edge_cells[edge_index, 0] = min(first, cell_index)
+                edge_cells[edge_index, 1] = max(first, cell_index)
+            else:
+                raise RuntimeError(f"edge {int(edge_index)} has more than two adjacent cells")
+    open_edges = np.flatnonzero(edge_cells[:, 1] < 0)
+    if open_edges.size:
+        raise RuntimeError(f"edge {int(open_edges[0])} has 1 adjacent cells, expected 2")
+    return edge_cells
+
+
+def _edge_vertices_from_cell_edges(
+    cells: np.ndarray,
+    cell_edges: np.ndarray,
+    edge_cells: np.ndarray,
+) -> np.ndarray:
+    edges = np.empty((edge_cells.shape[0], 2), dtype=np.int32)
+    for edge_index, adjacent_cells in enumerate(edge_cells):
+        cell_index = int(adjacent_cells[1])
+        if cell_index < 0:
+            cell_index = int(adjacent_cells[0])
+        local_positions = np.flatnonzero(cell_edges[cell_index] == edge_index)
+        if local_positions.size != 1:
+            raise RuntimeError("edge is not present exactly once in adjacent cell")
+        first = int(local_positions[0])
+        edges[edge_index] = (cells[cell_index, first], cells[cell_index, (first + 1) % 3])
+        if adjacent_cells[1] < 0:
+            edges[edge_index] = edges[edge_index, ::-1]
+    return edges
+
+
+def _order_cells_by_edges(
+    vertices: np.ndarray,
+    cells: np.ndarray,
+    edges: np.ndarray,
+    cell_edges: np.ndarray,
+    edge_cells: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    cell_centers = _cell_centers(vertices, cells, 1.0)
+    edge_centers = _edge_centers(vertices, edges, 1.0)
+    edge_system_orientation = _edge_system_orientation(
+        vertices,
+        cell_centers,
+        edges,
+        edge_cells,
+        edge_centers,
+    )
+    ordered_cells = np.empty_like(cells)
+    ordered_cell_edges = np.empty_like(cell_edges)
+    for cell_index, edges_for_cell in enumerate(cell_edges):
+        first_edge = int(edges_for_cell[0])
+        start_vertex, next_vertex = map(int, edges[first_edge])
+        cell_orientation = 1 if edge_cells[first_edge, 0] == cell_index else -1
+        if cell_orientation * int(edge_system_orientation[first_edge]) > 0:
+            start_vertex, next_vertex = next_vertex, start_vertex
+
+        ordered_cell_edges[cell_index, 0] = first_edge
+        ordered_cells[cell_index, 0] = start_vertex
+        current_edge = first_edge
+        current_vertex = next_vertex
+        used_edges = {first_edge}
+        for output_index in range(1, 3):
+            edge_index, following_vertex = _next_cell_edge(
+                edges,
+                edges_for_cell,
+                used_edges,
+                current_vertex,
+            )
+            ordered_cell_edges[cell_index, output_index] = edge_index
+            ordered_cells[cell_index, output_index] = current_vertex
+            used_edges.add(edge_index)
+            current_edge = edge_index
+            current_vertex = following_vertex
+        if current_vertex != start_vertex or current_edge < 0:
+            raise RuntimeError("cell edges do not form a closed triangle")
+    return ordered_cells, ordered_cell_edges
+
+
+def _next_cell_edge(
+    edges: np.ndarray,
+    cell_edges: np.ndarray,
+    used_edges: set[int],
+    vertex: int,
+) -> tuple[int, int]:
+    for edge_index in map(int, cell_edges):
+        if edge_index in used_edges:
+            continue
+        first, second = map(int, edges[edge_index])
+        if first == vertex:
+            return edge_index, second
+        if second == vertex:
+            return edge_index, first
+    raise RuntimeError("could not find next cell edge")
+
+
 def _cell_edge_indices(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    cell_count = cells.shape[0]
-    local_edges = np.stack(
-        (
-            cells[:, (0, 1)],
-            cells[:, (1, 2)],
-            cells[:, (2, 0)],
-        ),
-        axis=1,
-    ).reshape(-1, 2)
-    sorted_edges = np.sort(local_edges, axis=1).astype(np.int32, copy=False)
-
-    order = np.lexsort((sorted_edges[:, 1], sorted_edges[:, 0]))
-    ordered_edges = sorted_edges[order]
-    is_new = np.empty(ordered_edges.shape[0], dtype=bool)
-    is_new[0] = True
-    is_new[1:] = np.any(ordered_edges[1:] != ordered_edges[:-1], axis=1)
-    group_start = np.flatnonzero(is_new)
-    group_id_sorted = np.cumsum(is_new, dtype=np.int32) - 1
-    group_id_flat = np.empty_like(group_id_sorted)
-    group_id_flat[order] = group_id_sorted
-
-    first_flat = np.minimum.reduceat(order, group_start)
-    group_order = np.argsort(first_flat)
-    edge_id_by_group = np.empty(group_order.shape[0], dtype=np.int32)
-    edge_id_by_group[group_order] = np.arange(group_order.shape[0], dtype=np.int32)
-
-    edges = ordered_edges[group_start][group_order]
-    cell_edges = edge_id_by_group[group_id_flat].reshape(cell_count, 3)
+    edges, cell_edges, _ = _build_edges(cells)
     return edges, cell_edges
 
 
@@ -1613,47 +2075,39 @@ def _cell_centers(vertices: np.ndarray, cells: np.ndarray, radius: float) -> np.
 
 def _build_edges(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     cell_count = cells.shape[0]
-    local_edges = np.stack(
-        (
-            cells[:, (0, 1)],
-            cells[:, (1, 2)],
-            cells[:, (2, 0)],
-        ),
-        axis=1,
-    ).reshape(-1, 2)
-    sorted_edges = np.sort(local_edges, axis=1).astype(np.int32, copy=False)
-    flat_cells = np.repeat(np.arange(cell_count, dtype=np.int32), 3)
+    edge_lookup: dict[tuple[int, int], int] = {}
+    edges: list[tuple[int, int]] = []
+    edge_cells: list[list[int]] = []
+    cell_edges = np.empty((cell_count, 3), dtype=np.int32)
+    scan_pairs = ((1, 0, 0), (2, 1, 1), (0, 2, 2))
 
-    order = np.lexsort((sorted_edges[:, 1], sorted_edges[:, 0]))
-    ordered_edges = sorted_edges[order]
-    is_new = np.empty(ordered_edges.shape[0], dtype=bool)
-    is_new[0] = True
-    is_new[1:] = np.any(ordered_edges[1:] != ordered_edges[:-1], axis=1)
-    group_start = np.flatnonzero(is_new)
-    group_count = np.diff(np.r_[group_start, ordered_edges.shape[0]])
-    bad_groups = np.flatnonzero(group_count != 2)
-    if bad_groups.size:
-        bad_edge = int(bad_groups[0])
-        raise RuntimeError(
-            f"edge {bad_edge} has {int(group_count[bad_edge])} adjacent cells, expected 2"
-        )
+    for cell_index, cell in enumerate(cells):
+        for start, end, local_index in scan_pairs:
+            first = int(cell[start])
+            second = int(cell[end])
+            key = (first, second) if first < second else (second, first)
+            edge_index = edge_lookup.get(key)
+            if edge_index is None:
+                edge_index = len(edges)
+                edge_lookup[key] = edge_index
+                edges.append((first, second))
+                edge_cells.append([cell_index, -1])
+            elif edge_cells[edge_index][1] == -1:
+                edge_cells[edge_index][1] = cell_index
+            else:
+                raise RuntimeError(f"edge {edge_index} has more than two adjacent cells")
+            cell_edges[cell_index, local_index] = edge_index
 
-    group_id_sorted = np.cumsum(is_new, dtype=np.int32) - 1
-    group_id_flat = np.empty_like(group_id_sorted)
-    group_id_flat[order] = group_id_sorted
-
-    first_flat = np.minimum.reduceat(order, group_start)
-    second_flat = np.maximum.reduceat(order, group_start)
-    group_order = np.argsort(first_flat)
-    edge_id_by_group = np.empty(group_order.shape[0], dtype=np.int32)
-    edge_id_by_group[group_order] = np.arange(group_order.shape[0], dtype=np.int32)
-
-    edges = ordered_edges[group_start][group_order]
-    edge_cells = np.column_stack((flat_cells[first_flat], flat_cells[second_flat]))[
-        group_order
-    ]
-    cell_edges = edge_id_by_group[group_id_flat].reshape(cell_count, 3)
-    return edges, cell_edges, edge_cells
+    edge_cells_array = np.asarray(edge_cells, dtype=np.int32)
+    open_edges = np.flatnonzero(edge_cells_array[:, 1] < 0)
+    if open_edges.size:
+        bad_edge = int(open_edges[0])
+        raise RuntimeError(f"edge {bad_edge} has 1 adjacent cells, expected 2")
+    return (
+        np.asarray(edges, dtype=np.int32),
+        cell_edges,
+        edge_cells_array,
+    )
 
 
 def _write_icon_dimensions(dataset: Any, grid: IconGrid) -> None:
@@ -2530,6 +2984,8 @@ def _metadata(
         "number_of_grid_used": 1,
         "center": 255,
         "subcenter": 255,
+        "centre": 255,
+        "subcentre": 255,
         "crs_id": 0,
         "crs_name": "Spherical Earth",
         "grid_mapping_name": "latitude_longitude",
@@ -2538,15 +2994,25 @@ def _metadata(
         "inverse_flattening": 0.0,
     }
     if isinstance(spec, GlobalGridSpec):
+        metadata.update(
+            {
+                "centre": options.global_grid.centre,
+                "subcentre": options.global_grid.subcentre,
+                "center": options.global_grid.centre,
+                "subcenter": options.global_grid.subcentre,
+                "number_of_grid_used": options.global_grid.number_of_grid_used,
+                "spring_beta": options.global_grid.beta_spring,
+                "spring_maxit": options.global_grid.maxit,
+                "indexing_algorithm": options.global_grid.indexing_algorithm,
+                "grid_mapping_name": "lat_long_on_sphere",
+                "global_grid": 1,
+            }
+        )
         metadata["global_optimization"] = options.global_optimization.method
         if options.global_optimization.method != "none":
             metadata.update(
                 {
                     "global_optimization_iterations": options.global_optimization.iterations,
-                    "global_optimization_area_weight": options.global_optimization.area_weight,
-                    "global_optimization_pentagon_stretch": (
-                        options.global_optimization.pentagon_stretch
-                    ),
                 }
             )
     if isinstance(spec, TorusGridSpec):
@@ -2623,21 +3089,11 @@ def _spec_uuid(
     options: IconGridOptions,
 ) -> str:
     if isinstance(spec, GlobalGridSpec):
-        if options.global_optimization.method == "none":
-            return grid_uuid(
-                spec.name,
-                sphere_radius=options.sphere_radius,
-                rotation_axis=options.rotation_axis,
-                rotation_angle_degrees=options.rotation_angle_degrees,
-            )
         payload = {
             "generator": "grid_generator",
             "grid": spec.name,
             "sphere_radius": _canonical_float(options.sphere_radius),
-            "rotation": _canonical_rotation(
-                options.rotation_axis,
-                options.rotation_angle_degrees,
-            ),
+            "global_grid": _canonicalize_payload(asdict(options.global_grid)),
             "global_optimization": _canonicalize_payload(
                 asdict(options.global_optimization)
             ),
@@ -2720,17 +3176,32 @@ def grid_uuid(
     grid_name: str,
     *,
     sphere_radius: float = EARTH_RADIUS_M,
-    rotation_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
-    rotation_angle_degrees: float = 0.0,
+    global_grid: GlobalGridOptions | Mapping[str, Any] | None = None,
+    global_optimization: GlobalOptimizationOptions | Mapping[str, Any] | str | None = None,
 ) -> str:
     canonical_sphere_radius = finite_float_option("sphere_radius", sphere_radius)
     if canonical_sphere_radius <= 0.0:
         raise ValueError("sphere_radius must be positive")
+    grid_options = global_grid
+    if grid_options is None:
+        grid_options = GlobalGridOptions()
+    elif isinstance(grid_options, Mapping):
+        grid_options = GlobalGridOptions(**dict(grid_options))
+    if not isinstance(grid_options, GlobalGridOptions):
+        raise TypeError("global_grid must be None, a GlobalGridOptions instance, or a mapping")
+    if global_optimization is None:
+        optimization_options = GlobalOptimizationOptions(
+            method="spring",
+            iterations=grid_options.maxit,
+        )
+    else:
+        optimization_options = resolve_global_optimization_options(global_optimization)
     payload = {
         "generator": "grid_generator",
         "grid": parse_grid_spec(grid_name).name,
         "sphere_radius": _canonical_float(canonical_sphere_radius),
-        "rotation": _canonical_rotation(rotation_axis, rotation_angle_degrees),
+        "global_grid": _canonicalize_payload(asdict(grid_options)),
+        "global_optimization": _canonicalize_payload(asdict(optimization_options)),
     }
     return str(
         uuid.uuid5(
@@ -2738,26 +3209,6 @@ def grid_uuid(
             json.dumps(payload, sort_keys=True, separators=(",", ":")),
         )
     )
-
-
-def _canonical_rotation(
-    axis: tuple[float, float, float],
-    angle_degrees: float,
-) -> dict[str, Any]:
-    angle = _canonical_float(finite_float_option("rotation_angle_degrees", angle_degrees))
-    normalized_axis = np.asarray(axis, dtype=np.float64)
-    if normalized_axis.shape != (3,) or not np.all(np.isfinite(normalized_axis)):
-        raise ValueError("rotation_axis must contain three finite numbers")
-    axis_norm = np.linalg.norm(normalized_axis)
-    if axis_norm == 0.0 and angle != 0.0:
-        raise ValueError("rotation_axis must be non-zero when rotation_angle_degrees is non-zero")
-    if angle == 0.0:
-        return {"axis": [0.0, 0.0, 0.0], "angle_degrees": 0.0}
-    normalized_axis = normalized_axis / axis_norm
-    return {
-        "axis": [_canonical_float(value) for value in normalized_axis],
-        "angle_degrees": angle,
-    }
 
 
 def _canonical_float(value: float) -> float:

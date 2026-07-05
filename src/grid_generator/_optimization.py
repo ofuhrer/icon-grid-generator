@@ -11,6 +11,41 @@ from ._validation import finite_float_option
 
 
 @dataclass(frozen=True)
+class GlobalGridOptions:
+    """Options for compatible global spherical grid generation."""
+
+    beta_spring: float = 0.9
+    maxit: int = 2000
+    fixed_boundary: bool = True
+    north_pole_lon: float = 0.0
+    north_pole_lat: float = 90.0
+    rotation_angle_degrees: float = 0.0
+    indexing_algorithm: str = "new"
+    centre: int = 78
+    subcentre: int = 255
+    number_of_grid_used: int = 0
+
+    def __post_init__(self) -> None:
+        beta_spring = finite_float_option("beta_spring", self.beta_spring)
+        if beta_spring <= 0.0:
+            raise ValueError("beta_spring must be positive")
+        _validate_iterations("maxit", self.maxit)
+        if not isinstance(self.fixed_boundary, bool):
+            raise TypeError("fixed_boundary must be a boolean")
+        for name in ("north_pole_lon", "north_pole_lat", "rotation_angle_degrees"):
+            object.__setattr__(self, name, finite_float_option(name, getattr(self, name)))
+        if self.indexing_algorithm not in {"new", "old"}:
+            raise ValueError("indexing_algorithm must be 'new' or 'old'")
+        for name in ("centre", "subcentre", "number_of_grid_used"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        object.__setattr__(self, "beta_spring", beta_spring)
+
+
+@dataclass(frozen=True)
 class OptimizationOptions:
     """Options for deterministic Laplacian/spring grid smoothing."""
 
@@ -40,11 +75,6 @@ class GlobalOptimizationOptions:
 
     method: str = "none"
     iterations: int = 250
-    dt: float = 0.04
-    friction: float = 0.8
-    spring_stiffness: float = 1.0
-    area_weight: float = 0.008
-    pentagon_stretch: float = 1.24
 
     def __post_init__(self) -> None:
         if not isinstance(self.method, str):
@@ -52,17 +82,6 @@ class GlobalOptimizationOptions:
         if self.method not in {"none", "spring"}:
             raise ValueError("global optimization method must be 'none' or 'spring'")
         _validate_iterations("global optimization iterations", self.iterations)
-        for name in ("dt", "friction", "spring_stiffness", "area_weight", "pentagon_stretch"):
-            value = finite_float_option(name, getattr(self, name))
-            if name == "friction":
-                if not 0.0 <= value < 1.0:
-                    raise ValueError("friction must be in [0, 1)")
-            elif name in {"dt", "spring_stiffness", "pentagon_stretch"}:
-                if value <= 0.0:
-                    raise ValueError(f"{name} must be positive")
-            elif value < 0.0:
-                raise ValueError("area_weight must be non-negative")
-            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True)
@@ -171,68 +190,68 @@ def _validate_iterations(name: str, value: Any) -> None:
 
 
 def _spring_relaxed_vertices(grid: Any, opts: GlobalOptimizationOptions) -> np.ndarray:
-    from . import grid_generator as gg
-
     vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
+    vertices = _normalize_force_rows(vertices)
     edges = np.asarray(grid.edges, dtype=np.int64)
-    cells = np.asarray(grid.cells, dtype=np.int64)
-    degrees = np.bincount(edges.ravel(), minlength=vertices.shape[0])
-    pentagon_edge = (degrees[edges[:, 0]] == 5) | (degrees[edges[:, 1]] == 5)
+    global_grid = getattr(grid.options, "global_grid", GlobalGridOptions())
+    beta_spring = global_grid.beta_spring
+    maxit = opts.iterations
+    if maxit == 0:
+        return _project_vertices(grid, vertices)
+
+    edge_start = edges[:, 0]
+    edge_end = edges[:, 1]
+    dots = np.sum(vertices[edge_start] * vertices[edge_end], axis=1)
+    mean_edge_length = float(np.mean(np.arccos(np.clip(dots, -1.0, 1.0))))
+    len0 = beta_spring * mean_edge_length * 1.164
     velocity = np.zeros_like(vertices)
+    movable = _movable_vertices(grid, global_grid.fixed_boundary)
+    max_ekin = 0.0
+    max_test = 0.0
 
-    for _ in range(opts.iterations):
-        force = _edge_spring_force(vertices, edges, pentagon_edge, opts)
-        if opts.area_weight > 0.0:
-            force += _cell_area_force(vertices, cells, opts.area_weight, gg)
-        force -= np.sum(force * vertices, axis=1)[:, np.newaxis] * vertices
-        velocity = opts.friction * velocity + opts.dt * force
-        vertices = vertices + velocity
-        vertices = _project_vertices(grid, vertices)
-    return vertices
+    for iteration in range(1, maxit + 1):
+        if iteration <= 50:
+            dt = 1.6e-2
+        elif iteration <= 150:
+            dt = 1.6e-2 * (1.0 + 0.04 * (iteration - 50))
+        else:
+            dt = 8.0e-2
 
+        v_start = vertices[edge_start]
+        v_end = vertices[edge_end]
+        edge_dot = np.sum(v_start * v_end, axis=1)
+        edge_dot = np.clip(edge_dot, -1.0, 1.0)
+        denominator = np.sqrt(np.maximum(1.0 - edge_dot, np.finfo(np.float64).eps))
+        edge_direction = (v_end - v_start) / denominator[:, np.newaxis]
+        edge_factor = np.arccos(edge_dot) - len0
+        edge_force = edge_factor[:, np.newaxis] * edge_direction
 
-def _edge_spring_force(
-    vertices: np.ndarray,
-    edges: np.ndarray,
-    pentagon_edge: np.ndarray,
-    opts: GlobalOptimizationOptions,
-) -> np.ndarray:
-    start = vertices[edges[:, 0]]
-    end = vertices[edges[:, 1]]
-    chord = end - start
-    chord_length = np.linalg.norm(chord, axis=1)
-    arc_length = 2.0 * np.arcsin(np.clip(0.5 * chord_length, 0.0, 1.0))
-    target = np.mean(arc_length) * np.where(pentagon_edge, opts.pentagon_stretch, 1.0)
+        spring = np.zeros_like(vertices)
+        np.add.at(spring, edge_start, edge_force)
+        np.add.at(spring, edge_end, -edge_force)
+        spring /= np.sqrt(2.0)
+        spring[~movable] = 0.0
 
-    start_direction = end - np.sum(end * start, axis=1)[:, np.newaxis] * start
-    end_direction = start - np.sum(start * end, axis=1)[:, np.newaxis] * end
-    start_direction = _normalize_force_rows(start_direction)
-    end_direction = _normalize_force_rows(end_direction)
+        rhs = spring - velocity
+        previous = vertices.copy()
+        vertices = previous + dt * velocity
+        vertices = _normalize_force_rows(vertices)
+        vertices[~movable] = previous[~movable]
 
-    edge_force = opts.spring_stiffness * (arc_length - target)
-    force = np.zeros_like(vertices)
-    np.add.at(force, edges[:, 0], edge_force[:, np.newaxis] * start_direction)
-    np.add.at(force, edges[:, 1], edge_force[:, np.newaxis] * end_direction)
-    return force
+        new_velocity = velocity + dt * rhs
+        new_velocity -= np.sum(new_velocity * vertices, axis=1)[:, np.newaxis] * vertices
+        new_velocity[~movable] = 0.0
+        velocity = new_velocity
 
-
-def _cell_area_force(vertices: np.ndarray, cells: np.ndarray, weight: float, gg: Any) -> np.ndarray:
-    areas = gg._cell_areas(vertices, cells, 1.0)
-    mean_area = float(np.mean(areas))
-    if mean_area <= 0.0:
-        return np.zeros_like(vertices)
-    cell_centers = vertices[cells].sum(axis=1)
-    cell_centers = _normalize_force_rows(cell_centers)
-    area_deviation = (areas - mean_area) / mean_area
-
-    force = np.zeros_like(vertices)
-    for local_index in range(cells.shape[1]):
-        vertex_index = cells[:, local_index]
-        vertex = vertices[vertex_index]
-        direction = cell_centers - np.sum(cell_centers * vertex, axis=1)[:, np.newaxis] * vertex
-        direction = _normalize_force_rows(direction)
-        np.add.at(force, vertex_index, weight * area_deviation[:, np.newaxis] * direction)
-    return force
+        ekin = 0.5 * float(np.sum(velocity * velocity))
+        test = float(np.sum(spring * spring))
+        max_ekin = max(max_ekin, ekin)
+        max_test = max(max_test, test)
+        if iteration > 5 and test == max_test and max_test > 0.0:
+            break
+        if iteration > 5 and max_ekin > 0.0 and ekin < 0.001 * max_ekin:
+            break
+    return _project_vertices(grid, vertices)
 
 
 def _normalize_force_rows(values: np.ndarray) -> np.ndarray:

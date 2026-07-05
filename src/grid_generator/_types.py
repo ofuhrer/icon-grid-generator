@@ -17,6 +17,9 @@ class BisectionProvenance:
     parent_vertex_index: np.ndarray
     parent_cell_index: np.ndarray
     parent_cell_type: np.ndarray
+    child_edges: np.ndarray | None = None
+    child_cell_edges: np.ndarray | None = None
+    child_edge_cells: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

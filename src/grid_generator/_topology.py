@@ -13,7 +13,18 @@ class GlobalTopologyBuilder:
     def build(self, spec: Any, options: Any, geometry: GeometryData) -> TopologyData:
         from . import grid_generator as gg
 
-        edges, cell_edges, edge_cells = gg._build_edges(geometry.cells)
+        provenance = geometry.bisection_provenance
+        if (
+            provenance is not None
+            and provenance.child_edges is not None
+            and provenance.child_cell_edges is not None
+            and provenance.child_edge_cells is not None
+        ):
+            edges = provenance.child_edges
+            cell_edges = provenance.child_cell_edges
+            edge_cells = provenance.child_edge_cells
+        else:
+            edges, cell_edges, edge_cells = gg._build_edges(geometry.cells)
         if edges.shape[0] != spec.expected_edges:
             raise RuntimeError(
                 f"generated {edges.shape[0]} edges, expected {spec.expected_edges}"

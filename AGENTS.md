@@ -15,6 +15,32 @@ public API documented in `README.md` and `docs/api.md`.
 - `src/grid_generator/_diagnostics.py`, `_optimization.py`: optional utilities.
 - `tests/test_grid_generator.py`: contract and regression coverage.
 
+## Repository Intelligence
+
+- A local repowise service may be running at `http://127.0.0.1:7337`. When it
+  is reachable, prefer it over codebase-memory and use it as the first-choice
+  repo intelligence layer before broad manual exploration, especially for
+  onboarding, generated documentation, semantic search, symbol metadata,
+  dependency/call graphs, git risk, hotspots, health findings, ownership,
+  decisions, and refactoring context.
+- Repowise exposes FastAPI docs at `/docs` and `/redoc`, OpenAPI at
+  `/openapi.json`, health at `/health`, registered repos at `/api/repos`, and
+  its Codex/MCP-oriented tool surface at `/api/mcp/tools`.
+- Start by calling `/api/repos` to find the active `repo_id`, then scope
+  queries with that ID. Useful endpoints include `/api/search`, `/api/symbols`,
+  `/api/symbols/detail`, `/api/pages`, `/api/graph/{repo_id}/callers-callees`,
+  `/api/graph/{repo_id}/path`, `/api/repos/{repo_id}/overview-summary`,
+  `/api/repos/{repo_id}/health/overview`, and
+  `/api/repos/{repo_id}/risk/range`.
+- Use codebase-memory MCP tools (`search_graph`, `trace_path`,
+  `get_code_snippet`, `query_graph`, `search_code`) only when repowise is not
+  reachable, when repowise lacks the needed detail, or when a task explicitly
+  needs the codebase-memory graph. Be aware that codebase-memory may be stale;
+  index the repository first if freshness matters.
+- Treat repowise as contextual intelligence, not a replacement for source
+  verification. For exact behavior, verify with code snippets/local files and
+  the required checks.
+
 ## Design Constraints
 
 - Preserve deterministic output for identical specs and options.

@@ -21,19 +21,15 @@ class SphericalIcosahedralGeometry:
             [gg._orient_cell(tuple(face), vertices) for face in faces],
             dtype=np.int32,
         )
-        if spec.root > 1:
-            vertices, cells = gg._refine_triangles(vertices, cells, spec.root)
         bisection_provenance: BisectionProvenance | None = None
+        if spec.root > 1:
+            vertices, cells, bisection_provenance = gg._sadourny_root_grid(spec.root)
         for _ in range(spec.bisections):
             vertices, cells, bisection_provenance = (
                 gg._refine_triangles_bisection_with_provenance(vertices, cells)
             )
 
-        vertices = gg._rotate_points(
-            vertices,
-            options.rotation_axis,
-            options.rotation_angle_degrees,
-        )
+        vertices = gg._apply_global_grid_rotation(vertices, options.global_grid)
         vertices = vertices * options.radius
         gg._check_expected_counts(spec, vertices, cells)
 

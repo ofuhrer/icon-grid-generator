@@ -24,10 +24,14 @@
   experimental Numba acceleration. The default `"auto"` uses the reference path
   for small grids and may use Numba for large parent-provenance lookups when
   Numba is installed.
+- `GlobalGridOptions(...)` configures global spherical grid construction,
+  including spring beta, iteration limit, pole placement, rotation, indexing
+  mode, and exported centre/subcentre metadata.
 - `IconGridOptions(global_optimization="spring")` or
   `GlobalOptimizationOptions(method="spring", ...)` enables spring-relaxed
-  global spherical grids with unchanged topology and recomputed metrics. The
-  default is `"none"` to preserve raw bisection grids.
+  global spherical grids with unchanged topology and recomputed metrics. This is
+  the default for global spherical grids; use `global_optimization="none"` only
+  for diagnostics or raw topology checks.
 
 ## Grid Object
 
@@ -62,6 +66,7 @@ documentation moves with API changes:
 - `DiffusionOptions`
 - `GridCheckResult`
 - `GridStatistics`
+- `GlobalGridOptions`
 - `GlobalOptimizationOptions`
 - `IconGrid`
 - `IconGridOptions`

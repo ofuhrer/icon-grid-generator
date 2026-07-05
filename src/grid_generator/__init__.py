@@ -30,6 +30,7 @@ from ._diagnostics import (
 )
 from ._optimization import (
     DiffusionOptions,
+    GlobalGridOptions,
     GlobalOptimizationOptions,
     OptimizationOptions,
     diffuse_grid,
@@ -44,6 +45,7 @@ __all__ = [
     "DiffusionOptions",
     "GridCheckResult",
     "GridStatistics",
+    "GlobalGridOptions",
     "GlobalOptimizationOptions",
     "IconGrid",
     "IconGridOptions",
