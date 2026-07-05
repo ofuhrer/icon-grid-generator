@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 - 2026-07-05
+
+Patch release for relaxed global grid generation.
+
+- Add optional spring relaxation for global spherical grids with unchanged
+  topology and recomputed metrics.
+- Expose `GlobalOptimizationOptions` and `optimize_global_grid()` in the public
+  API.
+
 ## 0.2.0 - 2026-07-05
 
 Expanded grid generation, validation, and release automation.
