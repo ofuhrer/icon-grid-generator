@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from ._accelerated import SUPPORTED_ACCELERATORS, should_use_numba
+
 MAX_INDEXED_GRID_ELEMENTS = np.iinfo(np.int32).max
 
 
@@ -39,6 +41,12 @@ def validate_grid_options(spec: Any, options: Any) -> None:
     )
     if np.linalg.norm(rotation_axis) == 0.0 and rotation_angle_degrees != 0.0:
         raise ValueError("rotation_axis must be non-zero when rotation_angle_degrees is non-zero")
+    if not isinstance(options.accelerator, str):
+        raise TypeError("accelerator must be a string")
+    if options.accelerator not in SUPPORTED_ACCELERATORS:
+        names = ", ".join(sorted(SUPPORTED_ACCELERATORS))
+        raise ValueError(f"accelerator must be one of: {names}")
+    should_use_numba(options.accelerator)
 
     if options.max_cells is not None:
         if not isinstance(options.max_cells, int) or isinstance(options.max_cells, bool):

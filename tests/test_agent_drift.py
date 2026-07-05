@@ -26,6 +26,13 @@ pytestmark = pytest.mark.filterwarnings(
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_BLOCK_RE = re.compile(r"```python\n(.*?)\n```", re.DOTALL)
+PYTHON_VERSION_MATRIX_RE = re.compile(r"python-version:\s*\[([^\]]+)\]")
+PYTHON_BADGE_RE = re.compile(
+    r"https://img\.shields\.io/badge/python-(3\.\d+)--(3\.\d+)-blue\.svg"
+)
+PYTHON_CLASSIFIER_RE = re.compile(
+    r'"Programming Language :: Python :: (3\.\d+)"'
+)
 
 EXPECTED_NETCDF_DIMS = {
     "cell": 20,
@@ -146,6 +153,34 @@ def test_public_api_inventory_matches_documented_exports():
     documented = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", api_text))
 
     assert set(grid_generator.__all__) <= documented
+
+
+def test_readme_python_badge_matches_test_workflow_matrix():
+    workflow_text = (PROJECT_ROOT / ".github" / "workflows" / "test.yml").read_text()
+    matrix_versions = sorted(
+        {
+            version
+            for matrix in PYTHON_VERSION_MATRIX_RE.findall(workflow_text)
+            for version in re.findall(r'"([^"]+)"', matrix)
+        },
+        key=lambda version: tuple(int(part) for part in version.split(".")),
+    )
+    assert matrix_versions
+
+    minors = [int(version.split(".")[1]) for version in matrix_versions]
+    assert minors == list(range(min(minors), max(minors) + 1))
+
+    readme_text = (PROJECT_ROOT / "README.md").read_text()
+    badge_match = PYTHON_BADGE_RE.search(readme_text)
+    assert badge_match is not None
+    assert badge_match.groups() == (matrix_versions[0], matrix_versions[-1])
+
+    pyproject_text = (PROJECT_ROOT / "pyproject.toml").read_text()
+    classifier_versions = sorted(
+        set(PYTHON_CLASSIFIER_RE.findall(pyproject_text)),
+        key=lambda version: tuple(int(part) for part in version.split(".")),
+    )
+    assert classifier_versions == matrix_versions
 
 
 @pytest.mark.parametrize(

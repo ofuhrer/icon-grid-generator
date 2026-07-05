@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -26,6 +27,8 @@ class IconOrderingBuilder:
     def order_spherical_bisection(self, spec: Any, options: Any, geometry: GeometryData) -> GeometryData:
         if getattr(spec, "bisections", 0) == 0:
             return geometry
+        if geometry.bisection_provenance is not None:
+            return geometry
 
         from . import grid_generator as gg
 
@@ -40,6 +43,7 @@ class IconOrderingBuilder:
             geometry.cells,
             parent_vertex_index,
             parent,
+            options.accelerator,
         )
         child_order = np.asarray(
             [CHILD_ORDER[int(child_type)] for child_type in parent_cell_type],
@@ -50,6 +54,13 @@ class IconOrderingBuilder:
 
 
 def _permute_cells(geometry: GeometryData, permutation: np.ndarray) -> GeometryData:
+    provenance = geometry.bisection_provenance
+    if provenance is not None:
+        provenance = replace(
+            provenance,
+            parent_cell_index=provenance.parent_cell_index[permutation],
+            parent_cell_type=provenance.parent_cell_type[permutation],
+        )
     return GeometryData(
         vertices=geometry.vertices,
         cells=geometry.cells[permutation],
@@ -66,4 +77,5 @@ def _permute_cells(geometry: GeometryData, permutation: np.ndarray) -> GeometryD
             else geometry.source_cell_index[permutation]
         ),
         source_vertex_index=geometry.source_vertex_index,
+        bisection_provenance=provenance,
     )

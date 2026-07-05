@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import grid_generator as grid_generator_package
+from grid_generator import _accelerated
 from grid_generator import (
     ChannelGridSpec,
     CircleRegion,
@@ -292,11 +293,64 @@ def test_generate_grid_accepts_all_public_grid_specs():
         ),
         ({"rotation_angle_degrees": math.inf}, ValueError, "rotation_angle_degrees"),
         ({"rotation_angle_degrees": "0.05"}, TypeError, "rotation_angle_degrees"),
+        ({"accelerator": 1}, TypeError, "accelerator"),
+        ({"accelerator": "fast"}, ValueError, "accelerator"),
     ],
 )
 def test_generate_grid_rejects_invalid_options(options, error, message):
     with pytest.raises(error, match=message):
         generate_grid("R01B00", options=options)
+
+
+def test_numpy_accelerator_matches_auto_for_global_grid():
+    auto_grid = generate_grid("R02B02", options={"accelerator": "auto"})
+    numpy_grid = generate_grid("R02B02", options={"accelerator": "numpy"})
+
+    assert np.array_equal(numpy_grid.cells, auto_grid.cells)
+    assert np.array_equal(numpy_grid.edges, auto_grid.edges)
+    assert np.array_equal(numpy_grid.cell_edges, auto_grid.cell_edges)
+    assert np.array_equal(numpy_grid.edge_cells, auto_grid.edge_cells)
+    assert np.array_equal(
+        numpy_grid.icon_connectivity["v2c"],
+        auto_grid.icon_connectivity["v2c"],
+    )
+    assert np.array_equal(
+        numpy_grid.refinement["parent_cell_index"],
+        auto_grid.refinement["parent_cell_index"],
+    )
+    assert np.array_equal(
+        numpy_grid.refinement["parent_edge_index"],
+        auto_grid.refinement["parent_edge_index"],
+    )
+
+
+def test_auto_accelerator_uses_numba_only_for_large_lookup_work():
+    threshold = _accelerated.AUTO_NUMBA_MIN_LOOKUP_ROWS
+
+    assert not _accelerated.should_use_numba("auto")
+    assert not _accelerated.should_use_numba("auto", threshold - 1)
+    assert _accelerated.should_use_numba("auto", threshold) == _accelerated.is_numba_available()
+
+
+def test_numba_accelerator_is_optional_and_matches_numpy_when_available():
+    if not _accelerated.is_numba_available():
+        with pytest.raises(ModuleNotFoundError, match="accelerate"):
+            generate_grid("R02B02", options={"accelerator": "numba"})
+        return
+
+    numpy_grid = generate_grid("R02B02", options={"accelerator": "numpy"})
+    numba_grid = generate_grid("R02B02", options={"accelerator": "numba"})
+
+    assert np.array_equal(numba_grid.cells, numpy_grid.cells)
+    assert np.array_equal(numba_grid.edges, numpy_grid.edges)
+    assert np.array_equal(
+        numba_grid.refinement["parent_cell_type"],
+        numpy_grid.refinement["parent_cell_type"],
+    )
+    assert np.array_equal(
+        numba_grid.refinement["edge_parent_type"],
+        numpy_grid.refinement["edge_parent_type"],
+    )
 
 
 @pytest.mark.parametrize(
@@ -1109,6 +1163,19 @@ def test_r02b03_refinement_parent_fields_match_previous_bisection_sizes():
     assert np.max(refinement["parent_vertex_index"]) == parent.dims["vertex"]
     assert np.min(refinement["parent_vertex_index"]) == -parent.dims["edge"]
     assert len(np.unique(refinement["parent_vertex_index"])) == grid.dims["vertex"]
+
+
+def test_global_bisection_uses_structural_parent_provenance(monkeypatch):
+    def fail_coordinate_parent_lookup(*args, **kwargs):
+        raise AssertionError("coordinate parent lookup should not be used")
+
+    monkeypatch.setattr(gg, "_parent_vertex_indices", fail_coordinate_parent_lookup)
+
+    grid = generate_grid("R02B03")
+
+    assert grid.refinement["parent_vertex_index"].shape == (grid.dims["vertex"],)
+    assert set(np.unique(grid.refinement["parent_cell_type"])) == {200, 201, 202, 203}
+    assert set(np.unique(grid.refinement["edge_parent_type"])) == {101, 102, 201, 202, 203}
 
 
 def test_geofac_n2s_coefficients_are_diffusive_for_topography_smoothing():

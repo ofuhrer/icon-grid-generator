@@ -42,3 +42,30 @@ jobs:
       - name: Check package metadata
         if: matrix.python-version == '3.14'
         run: python -m twine check dist/*
+
+  accelerated-test:
+    name: Accelerated Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install accelerated package and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,docs,accelerate]"
+
+      - name: Checks
+        run: make check

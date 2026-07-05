@@ -40,7 +40,9 @@ from ._torus import (
     PlanarTorusMetricsBuilder,
     TorusRefinementBuilder,
 )
+from ._types import BisectionProvenance, GeometryData
 from ._validation import finite_float_option, validate_grid_options
+from . import _accelerated
 
 IconNetcdfField = tuple[str, tuple[str, ...], Any, dict[str, Any]]
 
@@ -748,6 +750,7 @@ class IconGridOptions:
     """Options for pure Python ICON grid generation."""
 
     max_cells: int | None = 2_000_000
+    accelerator: str = "auto"
     radius: float = 1.0
     sphere_radius: float = EARTH_RADIUS_M
     rotation_axis: tuple[float, float, float] = (1.0, 0.0, 0.0)
@@ -1343,6 +1346,8 @@ def _refine_triangles(
         raise ValueError("sections must be at least 1")
     if sections == 1:
         return vertices.copy(), cells.copy()
+    if sections == 2:
+        return _refine_triangles_bisection(vertices, cells)
 
     new_vertices: list[np.ndarray] = []
     old_vertex_ids: dict[int, int] = {}
@@ -1424,6 +1429,140 @@ def _refine_triangles(
         _normalize_rows(np.asarray(new_vertices, dtype=np.float64)),
         np.asarray(new_cells, dtype=np.int32),
     )
+
+
+def _refine_triangles_bisection(
+    vertices: np.ndarray,
+    cells: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split each triangle into four children using typed array operations."""
+    new_vertices, new_cells, _ = _refine_triangles_bisection_with_provenance(
+        vertices,
+        cells,
+    )
+    return new_vertices, new_cells
+
+
+def _refine_triangles_bisection_with_provenance(
+    vertices: np.ndarray,
+    cells: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, BisectionProvenance]:
+    """Split triangles into ICON-ordered bisection children and provenance."""
+    edge_vertices, cell_edges = _cell_edge_indices(cells)
+    old_vertex_count = vertices.shape[0]
+    edge_midpoint_index = (
+        old_vertex_count + np.arange(edge_vertices.shape[0], dtype=np.int32)
+    )
+    midpoint_vertices = 0.5 * (
+        vertices[edge_vertices[:, 0]] + vertices[edge_vertices[:, 1]]
+    )
+    new_vertices = np.vstack((vertices, midpoint_vertices))
+
+    ab = edge_midpoint_index[cell_edges[:, 0]]
+    bc = edge_midpoint_index[cell_edges[:, 1]]
+    ca = edge_midpoint_index[cell_edges[:, 2]]
+    a = cells[:, 0]
+    b = cells[:, 1]
+    c = cells[:, 2]
+
+    new_cells = np.empty((cells.shape[0] * 4, 3), dtype=np.int32)
+    new_cells[0::4] = np.column_stack((a, ab, ca))
+    new_cells[1::4] = np.column_stack((ab, bc, ca))
+    new_cells[2::4] = np.column_stack((ca, bc, c))
+    new_cells[3::4] = np.column_stack((ab, b, bc))
+    new_cells = _orient_cells_outward(new_cells, new_vertices)
+    child_order = (
+        np.repeat(np.arange(cells.shape[0], dtype=np.int32) * 4, 4)
+        + np.tile(np.array([1, 0, 3, 2], dtype=np.int32), cells.shape[0])
+    )
+    new_cells = new_cells[child_order]
+
+    parent_vertex_index = np.empty(new_vertices.shape[0], dtype=np.int32)
+    parent_vertex_index[:old_vertex_count] = np.arange(
+        1,
+        old_vertex_count + 1,
+        dtype=np.int32,
+    )
+    parent_vertex_index[old_vertex_count:] = -np.arange(
+        1,
+        edge_vertices.shape[0] + 1,
+        dtype=np.int32,
+    )
+    parent_cell_index = np.repeat(
+        np.arange(1, cells.shape[0] + 1, dtype=np.int32),
+        4,
+    )
+    parent_cell_type = np.tile(
+        np.array(
+            [
+                CHILD_CELL_TYPE_CENTER,
+                CHILD_CELL_TYPE_AT_VERTEX_0,
+                CHILD_CELL_TYPE_AT_VERTEX_1,
+                CHILD_CELL_TYPE_AT_VERTEX_2,
+            ],
+            dtype=np.int32,
+        ),
+        cells.shape[0],
+    )
+    provenance = BisectionProvenance(
+        cells=cells,
+        edges=edge_vertices,
+        cell_edges=cell_edges,
+        parent_vertex_index=parent_vertex_index,
+        parent_cell_index=parent_cell_index,
+        parent_cell_type=parent_cell_type,
+    )
+    return (
+        _normalize_rows(new_vertices.astype(np.float64, copy=False)),
+        new_cells,
+        provenance,
+    )
+
+
+def _cell_edge_indices(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    cell_count = cells.shape[0]
+    local_edges = np.stack(
+        (
+            cells[:, (0, 1)],
+            cells[:, (1, 2)],
+            cells[:, (2, 0)],
+        ),
+        axis=1,
+    ).reshape(-1, 2)
+    sorted_edges = np.sort(local_edges, axis=1).astype(np.int32, copy=False)
+
+    order = np.lexsort((sorted_edges[:, 1], sorted_edges[:, 0]))
+    ordered_edges = sorted_edges[order]
+    is_new = np.empty(ordered_edges.shape[0], dtype=bool)
+    is_new[0] = True
+    is_new[1:] = np.any(ordered_edges[1:] != ordered_edges[:-1], axis=1)
+    group_start = np.flatnonzero(is_new)
+    group_id_sorted = np.cumsum(is_new, dtype=np.int32) - 1
+    group_id_flat = np.empty_like(group_id_sorted)
+    group_id_flat[order] = group_id_sorted
+
+    first_flat = np.minimum.reduceat(order, group_start)
+    group_order = np.argsort(first_flat)
+    edge_id_by_group = np.empty(group_order.shape[0], dtype=np.int32)
+    edge_id_by_group[group_order] = np.arange(group_order.shape[0], dtype=np.int32)
+
+    edges = ordered_edges[group_start][group_order]
+    cell_edges = edge_id_by_group[group_id_flat].reshape(cell_count, 3)
+    return edges, cell_edges
+
+
+def _orient_cells_outward(cells: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    triangles = vertices[cells]
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    inward = np.sum(normals * triangles.sum(axis=1), axis=1) < 0.0
+    if not np.any(inward):
+        return cells
+
+    oriented = cells.copy()
+    flipped = oriented[inward]
+    flipped[:, [1, 2]] = flipped[:, [2, 1]]
+    oriented[inward] = flipped
+    return oriented
 
 
 def _check_expected_counts(spec: GlobalGridSpec, vertices: np.ndarray, cells: np.ndarray) -> None:
@@ -2093,8 +2232,7 @@ def _zonal_meridional_components(
 def _refinement_fields(
     spec: GlobalGridSpec,
     options: IconGridOptions,
-    vertices: np.ndarray,
-    cells: np.ndarray,
+    geometry: GeometryData,
     edges: np.ndarray,
     context: _GlobalGenerationContext | None = None,
 ) -> dict[str, np.ndarray]:
@@ -2105,6 +2243,8 @@ def _refinement_fields(
     in one field: positive values are one-based parent vertex IDs, and negative
     values are one-based parent edge IDs with a minus sign.
     """
+    vertices = geometry.vertices
+    cells = geometry.cells
     refinement = {
         "refin_c_ctrl": np.full(cells.shape[0], -4, dtype=np.int32),
         "refin_e_ctrl": np.full(edges.shape[0], -8, dtype=np.int32),
@@ -2124,25 +2264,40 @@ def _refinement_fields(
     if spec.bisections == 0:
         return refinement
 
-    if context is None:
-        context = _GlobalGenerationContext()
-    parent_vertex_index, parent = _parent_vertex_indices_cached(
-        spec,
-        options,
-        vertices,
-        context,
-    )
+    parent = geometry.bisection_provenance
+    if parent is None:
+        if context is None:
+            context = _GlobalGenerationContext()
+        parent_vertex_index, parent = _parent_vertex_indices_cached(
+            spec,
+            options,
+            vertices,
+            context,
+        )
+        parent_cell_index, parent_cell_type = _parent_cell_fields(
+            cells,
+            parent_vertex_index,
+            parent,
+            options.accelerator,
+        )
+    else:
+        parent_vertex_index = parent.parent_vertex_index
+        parent_cell_index = parent.parent_cell_index
+        parent_cell_type = parent.parent_cell_type
+
     refinement["parent_vertex_index"] = parent_vertex_index
-    refinement["parent_cell_index"], refinement["parent_cell_type"] = (
-        _parent_cell_fields(cells, parent_vertex_index, parent)
-    )
+    refinement["parent_cell_index"] = parent_cell_index
+    refinement["parent_cell_type"] = parent_cell_type
     refinement["parent_edge_index"], refinement["edge_parent_type"] = (
-        _parent_edge_fields(edges, parent_vertex_index, parent)
+        _parent_edge_fields(edges, parent_vertex_index, parent, options.accelerator)
     )
     return refinement
 
 
-def _parent_vertex_indices(vertices: np.ndarray, parent: IconGrid) -> np.ndarray:
+def _parent_vertex_indices(
+    vertices: np.ndarray,
+    parent: IconGrid | _GlobalParentData,
+) -> np.ndarray:
     lookup: dict[tuple[float, float, float], int] = {}
     for vertex_index, point in enumerate(_normalize_rows(parent.vertices)):
         lookup[_point_key(point)] = vertex_index + 1
@@ -2162,86 +2317,184 @@ def _point_key(point: np.ndarray) -> tuple[float, float, float]:
     return tuple(np.round(point.astype(np.float64), decimals=POINT_MATCH_DECIMALS))
 
 
+def _lookup_parent_signatures(
+    signature_keys: np.ndarray,
+    parent_index_values: np.ndarray,
+    type_values: np.ndarray,
+    query_keys: np.ndarray,
+    accelerator: str,
+    item_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    order = np.lexsort(tuple(signature_keys[:, column] for column in range(signature_keys.shape[1] - 1, -1, -1)))
+    sorted_keys = np.ascontiguousarray(signature_keys[order])
+    sorted_parent_index = np.ascontiguousarray(parent_index_values[order])
+    sorted_type = np.ascontiguousarray(type_values[order])
+
+    if _accelerated.should_use_numba(accelerator, query_keys.shape[0]):
+        if sorted_keys.shape[1] == 2:
+            parent_index, parent_type = _accelerated.lookup_width2_numba(
+                sorted_keys,
+                sorted_parent_index,
+                sorted_type,
+                np.ascontiguousarray(query_keys),
+            )
+        else:
+            parent_index, parent_type = _accelerated.lookup_width3_numba(
+                sorted_keys,
+                sorted_parent_index,
+                sorted_type,
+                np.ascontiguousarray(query_keys),
+            )
+    else:
+        parent_index, parent_type = _lookup_parent_signatures_numpy(
+            sorted_keys,
+            sorted_parent_index,
+            sorted_type,
+            query_keys,
+        )
+
+    missing = np.flatnonzero(parent_index == 0)
+    if missing.size:
+        raise RuntimeError(f"{item_name} {int(missing[0])} has no parent {item_name}")
+    return parent_index, parent_type
+
+
+def _lookup_parent_signatures_numpy(
+    signature_keys: np.ndarray,
+    parent_index_values: np.ndarray,
+    type_values: np.ndarray,
+    query_keys: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    signature_view = _row_view(signature_keys)
+    query_view = _row_view(query_keys)
+    positions = np.searchsorted(signature_view, query_view)
+    valid = positions < signature_view.shape[0]
+    found = np.zeros(query_view.shape[0], dtype=bool)
+    found[valid] = signature_view[positions[valid]] == query_view[valid]
+    parent_index = np.zeros(query_view.shape[0], dtype=np.int32)
+    parent_type = np.zeros(query_view.shape[0], dtype=np.int32)
+    parent_index[found] = parent_index_values[positions[found]]
+    parent_type[found] = type_values[positions[found]]
+    return parent_index, parent_type
+
+
+def _row_view(values: np.ndarray) -> np.ndarray:
+    contiguous = np.ascontiguousarray(values)
+    dtype = np.dtype(
+        {
+            "names": [f"f{index}" for index in range(contiguous.shape[1])],
+            "formats": [contiguous.dtype] * contiguous.shape[1],
+        }
+    )
+    return contiguous.view(dtype).reshape(-1)
+
+
 def _parent_cell_fields(
     cells: np.ndarray,
     parent_vertex_index: np.ndarray,
-    parent: IconGrid,
+    parent: IconGrid | _GlobalParentData | BisectionProvenance,
+    accelerator: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Map each fine cell to its parent cell and ICON child-cell type code."""
-    signature_map: dict[frozenset[int], tuple[int, int]] = {}
-    for parent_cell_index, (a, b, c) in enumerate(parent.cells):
-        e_ab, e_bc, e_ca = parent.cell_edges[parent_cell_index]
-        signatures = {
-            frozenset((int(a) + 1, -(int(e_ab) + 1), -(int(e_ca) + 1))): (
-                CHILD_CELL_TYPE_AT_VERTEX_0
-            ),
-            frozenset((int(b) + 1, -(int(e_ab) + 1), -(int(e_bc) + 1))): (
-                CHILD_CELL_TYPE_AT_VERTEX_1
-            ),
-            frozenset((int(c) + 1, -(int(e_ca) + 1), -(int(e_bc) + 1))): (
-                CHILD_CELL_TYPE_AT_VERTEX_2
-            ),
-            frozenset((-(int(e_ab) + 1), -(int(e_bc) + 1), -(int(e_ca) + 1))): (
-                CHILD_CELL_TYPE_CENTER
-            ),
-        }
-        for signature, child_type in signatures.items():
-            signature_map[signature] = (parent_cell_index + 1, child_type)
+    parent_cells = parent.cells.astype(np.int64, copy=False) + 1
+    parent_edges = parent.cell_edges.astype(np.int64, copy=False) + 1
+    a = parent_cells[:, 0]
+    b = parent_cells[:, 1]
+    c = parent_cells[:, 2]
+    e_ab = parent_edges[:, 0]
+    e_bc = parent_edges[:, 1]
+    e_ca = parent_edges[:, 2]
 
-    parent_cell_index = np.empty(cells.shape[0], dtype=np.int32)
-    parent_cell_type = np.empty(cells.shape[0], dtype=np.int32)
-    for cell_index, cell in enumerate(cells):
-        signature = frozenset(int(parent_vertex_index[vertex]) for vertex in cell)
-        parent_info = signature_map.get(signature)
-        if parent_info is None:
-            raise RuntimeError(f"cell {cell_index} has no parent cell")
-        parent_cell_index[cell_index], parent_cell_type[cell_index] = parent_info
-    return parent_cell_index, parent_cell_type
+    signature_keys = np.empty((parent.cells.shape[0] * 4, 3), dtype=np.int64)
+    signature_keys[0::4] = np.column_stack((a, -e_ab, -e_ca))
+    signature_keys[1::4] = np.column_stack((b, -e_ab, -e_bc))
+    signature_keys[2::4] = np.column_stack((c, -e_ca, -e_bc))
+    signature_keys[3::4] = np.column_stack((-e_ab, -e_bc, -e_ca))
+    signature_keys.sort(axis=1)
+
+    parent_indices = np.repeat(
+        np.arange(1, parent.cells.shape[0] + 1, dtype=np.int32),
+        4,
+    )
+    child_types = np.tile(
+        np.array(
+            [
+                CHILD_CELL_TYPE_AT_VERTEX_0,
+                CHILD_CELL_TYPE_AT_VERTEX_1,
+                CHILD_CELL_TYPE_AT_VERTEX_2,
+                CHILD_CELL_TYPE_CENTER,
+            ],
+            dtype=np.int32,
+        ),
+        parent.cells.shape[0],
+    )
+    query_keys = np.sort(parent_vertex_index[cells].astype(np.int64), axis=1)
+    return _lookup_parent_signatures(
+        signature_keys,
+        parent_indices,
+        child_types,
+        query_keys,
+        accelerator,
+        "cell",
+    )
 
 
 def _parent_edge_fields(
     edges: np.ndarray,
     parent_vertex_index: np.ndarray,
-    parent: IconGrid,
+    parent: IconGrid | _GlobalParentData | BisectionProvenance,
+    accelerator: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Map each fine edge to its parent edge and ICON child-edge type code."""
-    signature_map: dict[frozenset[int], tuple[int, int]] = {}
-    for parent_edge_index, (v0, v1) in enumerate(parent.edges):
-        midpoint = -(parent_edge_index + 1)
-        signature_map[frozenset((int(v0) + 1, midpoint))] = (
-            parent_edge_index + 1,
-            EDGE_CHILD_TYPE_FROM_VERTEX_0,
-        )
-        signature_map[frozenset((int(v1) + 1, midpoint))] = (
-            parent_edge_index + 1,
-            EDGE_CHILD_TYPE_FROM_VERTEX_1,
-        )
+    parent_edges = parent.edges.astype(np.int64, copy=False) + 1
+    edge_ids = np.arange(1, parent.edges.shape[0] + 1, dtype=np.int64)
+    midpoints = -edge_ids
 
-    for parent_cell_index, (a, b, c) in enumerate(parent.cells):
-        del a, b, c
-        e_ab, e_bc, e_ca = (int(edge) for edge in parent.cell_edges[parent_cell_index])
-        signature_map[frozenset((-(e_ab + 1), -(e_ca + 1)))] = (
-            e_bc + 1,
-            EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_0,
-        )
-        signature_map[frozenset((-(e_ab + 1), -(e_bc + 1)))] = (
-            e_ca + 1,
-            EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_1,
-        )
-        signature_map[frozenset((-(e_ca + 1), -(e_bc + 1)))] = (
-            e_ab + 1,
-            EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_2,
-        )
+    parent_cell_edges = parent.cell_edges.astype(np.int64, copy=False) + 1
+    e_ab = parent_cell_edges[:, 0]
+    e_bc = parent_cell_edges[:, 1]
+    e_ca = parent_cell_edges[:, 2]
 
-    parent_edge_index = np.empty(edges.shape[0], dtype=np.int32)
-    edge_parent_type = np.empty(edges.shape[0], dtype=np.int32)
-    for edge_index, edge in enumerate(edges):
-        signature = frozenset(int(parent_vertex_index[vertex]) for vertex in edge)
-        parent_info = signature_map.get(signature)
-        if parent_info is None:
-            raise RuntimeError(f"edge {edge_index} has no parent edge")
-        parent_edge_index[edge_index], edge_parent_type[edge_index] = parent_info
-    return parent_edge_index, edge_parent_type
+    edge_signature_count = parent.edges.shape[0] * 2
+    cell_signature_count = parent.cells.shape[0] * 3
+    signature_keys = np.empty(
+        (edge_signature_count + cell_signature_count, 2),
+        dtype=np.int64,
+    )
+    parent_indices = np.empty(signature_keys.shape[0], dtype=np.int32)
+    edge_types = np.empty(signature_keys.shape[0], dtype=np.int32)
+
+    signature_keys[0:edge_signature_count:2] = np.column_stack(
+        (parent_edges[:, 0], midpoints)
+    )
+    signature_keys[1:edge_signature_count:2] = np.column_stack(
+        (parent_edges[:, 1], midpoints)
+    )
+    parent_indices[:edge_signature_count] = np.repeat(edge_ids.astype(np.int32), 2)
+    edge_types[0:edge_signature_count:2] = EDGE_CHILD_TYPE_FROM_VERTEX_0
+    edge_types[1:edge_signature_count:2] = EDGE_CHILD_TYPE_FROM_VERTEX_1
+
+    offset = edge_signature_count
+    signature_keys[offset + 0 :: 3] = np.column_stack((-e_ab, -e_ca))
+    signature_keys[offset + 1 :: 3] = np.column_stack((-e_ab, -e_bc))
+    signature_keys[offset + 2 :: 3] = np.column_stack((-e_ca, -e_bc))
+    parent_indices[offset + 0 :: 3] = e_bc.astype(np.int32)
+    parent_indices[offset + 1 :: 3] = e_ca.astype(np.int32)
+    parent_indices[offset + 2 :: 3] = e_ab.astype(np.int32)
+    edge_types[offset + 0 :: 3] = EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_0
+    edge_types[offset + 1 :: 3] = EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_1
+    edge_types[offset + 2 :: 3] = EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_2
+
+    signature_keys.sort(axis=1)
+    query_keys = np.sort(parent_vertex_index[edges].astype(np.int64), axis=1)
+    return _lookup_parent_signatures(
+        signature_keys,
+        parent_indices,
+        edge_types,
+        query_keys,
+        accelerator,
+        "edge",
+    )
 
 
 def _metadata(

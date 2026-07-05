@@ -41,10 +41,9 @@ deterministic pipeline:
   grids up to current large operational scales such as `R02B11` are within that
   range; generation fails early when cells, edges, or vertices would exceed the
   int32 index limit.
-- Parent/provenance fields for bisection grids are matched from floating-point
-  Cartesian coordinates rounded to an internal tolerance. This is deterministic
-  for supported global resolutions, but structural parent tracking would be a
-  stronger approach for substantially finer grids.
+- Global bisection parent/provenance fields are tracked structurally during
+  refinement. Some defensive fallback paths can still use rounded coordinate
+  matching when geometry is constructed outside the normal global pipeline.
 - Spherical metrics use double-precision trigonometric formulas. They are
   appropriate for supported resolutions, but extremely small triangles can make
   angle-sum area formulas and `arccos`-based distances more sensitive to
@@ -52,6 +51,63 @@ deterministic pipeline:
 - The implementation assumes closed global triangular meshes have vertex
   valence at most six. Limited-area and planar grids use separate open-mesh
   paths where boundary sentinels are expected.
+
+## Performance and Scaling
+
+For large global `R<n>B<k>` grids, the useful scaling variable is the effective
+refinement frequency
+
+```text
+f = n * 2^k
+```
+
+The main asymptotic behavior follows directly from `f`:
+
+```text
+cells    = 20 * f^2      = 20 * n^2 * 4^k
+edges    = 30 * f^2      = 30 * n^2 * 4^k
+vertices = 10 * f^2 + 2  = 10 * n^2 * 4^k + 2
+```
+
+Generation time, peak memory, and NetCDF file size are therefore all expected
+to scale approximately as `O(n^2 * 4^k)` for sufficiently large global grids.
+Equivalently, each additional bisection level roughly multiplies work and
+output size by four.
+
+The measured single-process generation-time model on the benchmark machine is:
+
+```text
+generation_seconds ~= 9.5e-5 * f^2
+                   ~= 4.8e-6 * cells
+```
+
+Peak memory is less exact because it includes temporary arrays, Python/NumPy
+allocator behavior, and whether NetCDF export is running. For large measured
+global grids, generation peak RSS was roughly:
+
+```text
+peak_generation_rss_gb ~= (2.5e-5 to 3.6e-5) * f^2
+                       ~= (1.3e-6 to 1.8e-6) * cells
+```
+
+NetCDF file size is the most predictable of the three:
+
+```text
+netcdf_size_mb ~= 0.0168 * f^2
+               ~= 0.000838 * cells
+```
+
+These constants were calibrated on an Apple M1 laptop with 16 GB RAM, macOS
+26.5.1, and Python 3.11.11. Generation timings exclude NetCDF export; file size
+is for the standard ICON-style NetCDF output. Treat runtime and memory constants
+as hardware-specific estimates, not guarantees. The asymptotic `n^2 * 4^k`
+scaling is the portable part of the model.
+
+| Grid | `f` | Cells | Generation | Peak RSS | NetCDF size |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `R02B06` | 128 | 327,680 | 1.55 s | 0.58 GB | 275 MB |
+| `R02B07` | 256 | 1,310,720 | 5.98 s | 2.34 GB | 1.1 GB |
+| `R02B08` | 512 | 5,242,880 | 25.34 s | 6.57 GB | 4.4 GB |
 
 ## Testing Expectations
 

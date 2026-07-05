@@ -8,6 +8,18 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class BisectionProvenance:
+    """Immediate-parent topology and ICON provenance for one bisection step."""
+
+    cells: np.ndarray
+    edges: np.ndarray
+    cell_edges: np.ndarray
+    parent_vertex_index: np.ndarray
+    parent_cell_index: np.ndarray
+    parent_cell_type: np.ndarray
+
+
+@dataclass(frozen=True)
 class GeometryData:
     """Primal grid points and cell centers."""
 
@@ -22,6 +34,7 @@ class GeometryData:
     cell_vertex_lat: np.ndarray
     source_cell_index: np.ndarray | None = None
     source_vertex_index: np.ndarray | None = None
+    bisection_provenance: BisectionProvenance | None = None
 
 
 @dataclass(frozen=True)

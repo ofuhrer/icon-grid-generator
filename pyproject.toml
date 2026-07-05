@@ -41,6 +41,7 @@ Repository = "https://github.com/ofuhrer/icon-grid-generator"
 Source = "https://github.com/ofuhrer/icon-grid-generator"
 
 [project.optional-dependencies]
+accelerate = ["numba>=0.63"]
 docs = ["mkdocs", "mkdocs-material"]
 netcdf = ["netCDF4"]
 xarray = ["xarray"]

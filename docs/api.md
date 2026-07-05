@@ -17,6 +17,14 @@
 - `StretchedTorusGridSpec`, `ChannelGridSpec`, `ParallelogramGridSpec`, and
   `RaggedOrthogonalGridSpec` cover additional planar variants.
 
+## Options
+
+- `IconGridOptions(accelerator="auto")` controls optional acceleration. Use
+  `"numpy"` for the reference NumPy implementation or `"numba"` to require
+  experimental Numba acceleration. The default `"auto"` uses the reference path
+  for small grids and may use Numba for large parent-provenance lookups when
+  Numba is installed.
+
 ## Grid Object
 
 `IconGrid` exposes:

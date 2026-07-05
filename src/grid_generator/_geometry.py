@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from ._types import GeometryData
+from ._types import BisectionProvenance, GeometryData
 
 
 class SphericalIcosahedralGeometry:
@@ -23,8 +23,11 @@ class SphericalIcosahedralGeometry:
         )
         if spec.root > 1:
             vertices, cells = gg._refine_triangles(vertices, cells, spec.root)
+        bisection_provenance: BisectionProvenance | None = None
         for _ in range(spec.bisections):
-            vertices, cells = gg._refine_triangles(vertices, cells, 2)
+            vertices, cells, bisection_provenance = (
+                gg._refine_triangles_bisection_with_provenance(vertices, cells)
+            )
 
         vertices = gg._rotate_points(
             vertices,
@@ -47,4 +50,5 @@ class SphericalIcosahedralGeometry:
             cell_center_xyz=cell_center_xyz,
             cell_vertex_lon=vertex_lon[cells],
             cell_vertex_lat=vertex_lat[cells],
+            bisection_provenance=bisection_provenance,
         )

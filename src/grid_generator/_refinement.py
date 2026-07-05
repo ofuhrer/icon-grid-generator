@@ -26,8 +26,7 @@ class GlobalRefinementBuilder:
             fields=gg._refinement_fields(
                 spec,
                 options,
-                geometry.vertices,
-                geometry.cells,
+                geometry,
                 topology.edges,
                 self.context,
             )
