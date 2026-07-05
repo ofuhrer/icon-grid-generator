@@ -9,3 +9,10 @@ dist/
 build/
 site/
 tmp/
+
+# Local agent/editor tooling
+.claude/
+.mcp.json
+.repowise/
+.repowise-workspace.yaml
+.vscode/
