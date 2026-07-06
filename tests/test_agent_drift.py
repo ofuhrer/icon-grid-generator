@@ -13,11 +13,11 @@ from grid_generator import (
     GlobalGridSpec,
     LimitedAreaGridSpec,
     ParallelogramGridSpec,
-    RaggedOrthogonalGridSpec,
-    StretchedTorusGridSpec,
+    Region,
     TorusGridSpec,
     generate_grid,
 )
+from grid_generator.planar import RaggedOrthogonalGridSpec, StretchedTorusGridSpec
 
 
 pytestmark = pytest.mark.filterwarnings(
@@ -193,11 +193,13 @@ def test_readme_python_badge_matches_test_workflow_matrix():
         ParallelogramGridSpec(nx=3, ny=2, edge_length=1.0),
         RaggedOrthogonalGridSpec(nx=3, ny=2, dx=1.0, dy=1.0),
         LimitedAreaGridSpec(
-            "R02B01",
-            lon_min=-30.0,
-            lon_max=30.0,
-            lat_min=-30.0,
-            lat_max=30.0,
+            parent="R02B01",
+            region=Region.lonlat_box(
+                lon_min=-30.0,
+                lon_max=30.0,
+                lat_min=-30.0,
+                lat_max=30.0,
+            ),
             boundary_depth=1,
         ),
     ],

@@ -11,8 +11,8 @@ from ._validation import finite_float_option
 
 
 @dataclass(frozen=True)
-class GlobalGridOptions:
-    """Options for compatible global spherical grid generation."""
+class _GlobalGridOptions:
+    """Internal options for compatible global spherical grid generation."""
 
     beta_spring: float = 0.9
     maxit: int = 2000
@@ -70,8 +70,8 @@ class OptimizationOptions:
 
 
 @dataclass(frozen=True)
-class GlobalOptimizationOptions:
-    """Options for spring-relaxed global spherical grids."""
+class _GlobalOptimizationOptions:
+    """Internal options for spring-relaxed global spherical grids."""
 
     method: str = "none"
     iterations: int = 250
@@ -112,27 +112,25 @@ class DiffusionOptions:
         object.__setattr__(self, "neighbor_weight", neighbor_weight)
 
 
-def resolve_global_optimization_options(value: Any) -> GlobalOptimizationOptions:
+def resolve_global_optimization_options(value: Any) -> _GlobalOptimizationOptions:
     """Normalize global optimization option shorthands."""
     if value is None:
-        return GlobalOptimizationOptions()
-    if isinstance(value, GlobalOptimizationOptions):
+        return _GlobalOptimizationOptions()
+    if isinstance(value, _GlobalOptimizationOptions):
         return value
     if isinstance(value, str):
-        return GlobalOptimizationOptions(method=value)
+        return _GlobalOptimizationOptions(method=value)
     if isinstance(value, dict):
-        return GlobalOptimizationOptions(**value)
+        return _GlobalOptimizationOptions(**value)
     raise TypeError(
-        "global_optimization must be None, a method string, a mapping, "
-        "or a GlobalOptimizationOptions instance"
+        "options must be None, a method string, a mapping, "
+        "or an internal global optimization option instance"
     )
 
 
-def optimize_global_grid(grid: Any, options: GlobalOptimizationOptions | None = None) -> Any:
+def optimize_global_grid(grid: Any, options: Any = None) -> Any:
     """Return a spring-relaxed global spherical grid with unchanged topology."""
-    opts = GlobalOptimizationOptions(method="spring") if options is None else options
-    if not isinstance(opts, GlobalOptimizationOptions):
-        raise TypeError("options must be a GlobalOptimizationOptions instance or None")
+    opts = _GlobalOptimizationOptions(method="spring") if options is None else resolve_global_optimization_options(options)
     if opts.method == "none" or opts.iterations == 0:
         return grid
     if grid.metadata.get("grid_geometry") != 1:
@@ -189,11 +187,11 @@ def _validate_iterations(name: str, value: Any) -> None:
         raise ValueError(f"{name} must be non-negative")
 
 
-def _spring_relaxed_vertices(grid: Any, opts: GlobalOptimizationOptions) -> np.ndarray:
+def _spring_relaxed_vertices(grid: Any, opts: _GlobalOptimizationOptions) -> np.ndarray:
     vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
     vertices = _normalize_force_rows(vertices)
     edges = np.asarray(grid.edges, dtype=np.int64)
-    global_grid = getattr(grid.options, "global_grid", GlobalGridOptions())
+    global_grid = getattr(grid.options, "global_grid", _GlobalGridOptions())
     beta_spring = global_grid.beta_spring
     maxit = opts.iterations
     if maxit == 0:

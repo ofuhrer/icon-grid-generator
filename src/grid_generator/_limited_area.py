@@ -52,14 +52,7 @@ def cut_existing_grid(parent: Any, spec: Any) -> tuple[GeometryData, TopologyDat
 
 
 def _selected_cells(parent: Any, spec: Any) -> set[int]:
-    lon_min = spec.lon_min
-    lon_max = spec.lon_max
-    if lon_min <= lon_max:
-        lon_mask = (parent.lon >= lon_min) & (parent.lon <= lon_max)
-    else:
-        lon_mask = (parent.lon >= lon_min) | (parent.lon <= lon_max)
-    lat_mask = (parent.lat >= spec.lat_min) & (parent.lat <= spec.lat_max)
-    return set(np.nonzero(lon_mask & lat_mask)[0].astype(int))
+    return set(np.nonzero(_region_mask(parent.lon, parent.lat, spec.region))[0].astype(int))
 
 
 def _selected_cells_from_regions(parent: Any, spec: Any) -> set[int]:
@@ -70,7 +63,7 @@ def _selected_cells_from_regions(parent: Any, spec: Any) -> set[int]:
 
 
 def _region_mask(lon: np.ndarray, lat: np.ndarray, region: Any) -> np.ndarray:
-    name = region.__class__.__name__
+    name = region.__class__.__name__.removeprefix("_")
     if name == "LonLatBoxRegion":
         if region.lon_min <= region.lon_max:
             lon_mask = (lon >= region.lon_min) & (lon <= region.lon_max)

@@ -1,37 +1,74 @@
 # API Overview
 
-## Public Entry Point
+## Root API
 
 - `generate_grid(spec, options=None)` creates an `IconGrid` from an ICON
   `R<n>B<k>` string or a grid specification object.
-- `parse_grid_spec(grid_name)` parses compact global grid names such as
-  `R2B3` and returns canonical zero-padded names such as `R02B03`.
-- `grid_uuid(grid_name, ...)` returns a stable UUID for supported grid
-  parameters.
+- `IconGridOptions(...)` configures generation limits, acceleration, spherical
+  radius, spring relaxation, rotation, indexing, and exported metadata.
+- `IconGrid` is the in-memory grid object returned by all generators.
+
+The root import surface is intentionally small:
+
+```python
+from grid_generator import (
+    generate_grid,
+    IconGrid,
+    IconGridOptions,
+    GlobalGridSpec,
+    TorusGridSpec,
+    ChannelGridSpec,
+    ParallelogramGridSpec,
+    LimitedAreaGridSpec,
+    CutGridSpec,
+    Region,
+)
+```
 
 ## Grid Specifications
 
-- `GlobalGridSpec` describes spherical ICON `R<n>B<k>` grids.
+- `GlobalGridSpec` describes spherical ICON `R<n>B<k>` grids. Strings such as
+  `"R2B4"` are shorthand for this common path.
 - `TorusGridSpec` describes planar doubly periodic triangular torus grids.
-- `LimitedAreaGridSpec` extracts a region from a generated global parent grid.
-- `StretchedTorusGridSpec`, `ChannelGridSpec`, `ParallelogramGridSpec`, and
-  `RaggedOrthogonalGridSpec` cover additional planar variants.
+- `ChannelGridSpec` describes a planar triangular channel with open boundaries
+  in one direction and periodic boundaries in the other.
+- `ParallelogramGridSpec` describes a skewed planar triangular parallelogram.
+- `LimitedAreaGridSpec(parent=..., region=..., boundary_depth=...)` extracts a
+  compact regional grid from a generated global parent.
+- `CutGridSpec(regions=..., mode=..., boundary_depth=...)` configures cutting
+  of an existing grid using one or more region predicates. Use it with
+  `grid_generator.cutting.cut_grid`.
+
+Advanced but supported planar variants live in `grid_generator.planar`:
+
+```python
+from grid_generator.planar import RaggedOrthogonalGridSpec, StretchedTorusGridSpec
+```
+
+## Regions
+
+Use `Region` constructors for limited-area extraction and cutting:
+
+- `Region.lonlat_box(lon_min=..., lon_max=..., lat_min=..., lat_max=...)`
+- `Region.circle(lon=..., lat=..., radius_degrees=...)`
+- `Region.rectangle(lon=..., lat=..., width_degrees=..., height_degrees=..., angle_degrees=...)`
+- `Region.polygon(((lon0, lat0), (lon1, lat1), ...))`
 
 ## Options
 
-- `IconGridOptions(accelerator="auto")` controls optional acceleration. Use
-  `"numpy"` for the reference NumPy implementation or `"numba"` to require
-  experimental Numba acceleration. The default `"auto"` uses the reference path
-  for small grids and may use Numba for large parent-provenance lookups when
-  Numba is installed.
-- `GlobalGridOptions(...)` configures global spherical grid construction,
-  including spring beta, iteration limit, pole placement, rotation, indexing
-  mode, and exported centre/subcentre metadata.
-- `IconGridOptions(global_optimization="spring")` or
-  `GlobalOptimizationOptions(method="spring", ...)` enables spring-relaxed
-  global spherical grids with unchanged topology and recomputed metrics. This is
-  the default for global spherical grids; use `global_optimization="none"` only
-  for diagnostics or raw topology checks.
+`IconGridOptions` is a flat dataclass. Common fields are:
+
+- `max_cells`: generation safety limit.
+- `accelerator`: `"auto"`, `"numpy"`, or `"numba"`.
+- `sphere_radius`: spherical grid radius used for metric fields.
+- `optimize_global`: enable staged spring relaxation for global grids.
+- `spring_beta` and `spring_iterations`: global spring relaxation controls.
+- `north_pole_lon`, `north_pole_lat`, and `rotation_angle_degrees`: spherical
+  orientation controls.
+- `indexing`: global indexing convention.
+- `centre`, `subcentre`, and `number_of_grid_used`: exported metadata fields.
+
+Use `optimize_global=False` only for raw topology diagnostics or tests.
 
 ## Grid Object
 
@@ -46,14 +83,22 @@
 - `metadata`: scalar grid attributes used for export and provenance.
 - `to_dict()`, `to_xarray()`, and `to_netcdf(path)`: conversion helpers.
 
-## Diagnostics And Postprocessing
+## Diagnostics And Transforms
 
-- `check_grid(grid)` validates basic topology and geometry consistency.
-- `grid_statistics(grid)` summarizes counts, boundary edges, areas, and edge
-  lengths.
-- `triangle_properties(grid)` returns per-cell triangle metrics.
-- `optimize_grid(grid, options=None)` and `diffuse_grid(grid, options=None)`
-  return geometry-transformed copies with unchanged topology.
+Diagnostics and postprocessing utilities are available from focused modules:
+
+```python
+from grid_generator.diagnostics import (
+    check_grid,
+    grid_statistics,
+    triangle_properties,
+    cell_divergence,
+    cell_vorticity_fnorm,
+)
+from grid_generator.transforms import diffuse_grid, optimize_grid
+```
+
+Their result and option dataclasses are exported from the same submodules.
 
 ## Public API Inventory
 
@@ -61,33 +106,12 @@ Every name exported from `grid_generator.__all__` should appear here so public
 documentation moves with API changes:
 
 - `ChannelGridSpec`
-- `CircleRegion`
 - `CutGridSpec`
-- `DiffusionOptions`
-- `GridCheckResult`
-- `GridStatistics`
-- `GlobalGridOptions`
-- `GlobalOptimizationOptions`
+- `GlobalGridSpec`
 - `IconGrid`
 - `IconGridOptions`
-- `GlobalGridSpec`
 - `LimitedAreaGridSpec`
-- `LonLatBoxRegion`
-- `OptimizationOptions`
-- `OrientedRectangleRegion`
 - `ParallelogramGridSpec`
-- `PolygonRegion`
-- `RaggedOrthogonalGridSpec`
-- `StretchedTorusGridSpec`
-- `TriangleProperties`
+- `Region`
 - `TorusGridSpec`
-- `cell_divergence`
-- `cell_vorticity_fnorm`
-- `check_grid`
-- `cut_grid`
-- `diffuse_grid`
 - `generate_grid`
-- `grid_statistics`
-- `optimize_global_grid`
-- `optimize_grid`
-- `triangle_properties`

@@ -83,7 +83,7 @@ R02B03
 Generate a spring-relaxed global grid:
 
 ```python
-grid = generate_grid("R2B3", options={"max_cells": None, "global_optimization": "spring"})
+grid = generate_grid("R2B3", options={"max_cells": None, "spring_iterations": 2_000})
 print(grid.metadata["global_optimization"])
 ```
 
@@ -100,14 +100,11 @@ print(grid.metadata["domain_length"])
 Extract a limited-area grid from a generated global parent:
 
 ```python
-from grid_generator import LimitedAreaGridSpec, generate_grid
+from grid_generator import LimitedAreaGridSpec, Region, generate_grid
 
 spec = LimitedAreaGridSpec(
-    "R02B03",
-    lon_min=-20.0,
-    lon_max=20.0,
-    lat_min=35.0,
-    lat_max=60.0,
+    parent="R02B03",
+    region=Region.lonlat_box(lon_min=-20.0, lon_max=20.0, lat_min=35.0, lat_max=60.0),
     boundary_depth=2,
 )
 grid = generate_grid(spec, options={"max_cells": None})

@@ -41,9 +41,9 @@ def validate_grid_options(spec: Any, options: Any) -> None:
 
     global_optimization = getattr(options, "global_optimization", None)
     if global_optimization is None:
-        raise TypeError("global_optimization must be a valid optimization option")
+        raise TypeError("options must include resolved global optimization settings")
     if global_optimization.method != "none" and not hasattr(spec, "bisections"):
-        raise ValueError("global_optimization is only supported for global grids")
+        raise ValueError("optimize_global is only supported for global grids")
 
     if options.max_cells is not None:
         if not isinstance(options.max_cells, int) or isinstance(options.max_cells, bool):

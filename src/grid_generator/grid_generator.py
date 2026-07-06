@@ -8,7 +8,7 @@ refinement-provenance fields needed to write a compact ICON grid NetCDF file.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import getpass
 from pathlib import Path
@@ -25,10 +25,9 @@ from ._io import IconNetcdfWriter
 from ._limited_area import LimitedAreaExtractor
 from ._metrics import SphericalMetricsBuilder
 from ._optimization import (
-    GlobalOptimizationOptions,
-    GlobalGridOptions,
+    _GlobalGridOptions,
+    _GlobalOptimizationOptions,
     optimize_global_grid,
-    resolve_global_optimization_options,
 )
 from ._ordering import IconOrderingBuilder
 from ._planar import (
@@ -559,32 +558,22 @@ class RaggedOrthogonalGridSpec:
 class LimitedAreaGridSpec:
     """Limited-area grid extracted from a generated global parent grid."""
 
-    parent_grid_name: str
-    lon_min: float
-    lon_max: float
-    lat_min: float
-    lat_max: float
+    parent: str | GlobalGridSpec
+    region: Any
     boundary_depth: int = 0
     name: str = ""
 
     def __post_init__(self) -> None:
-        parent = parse_grid_spec(self.parent_grid_name)
-        lon_min = _finite_float_option("lon_min", self.lon_min)
-        lon_max = _finite_float_option("lon_max", self.lon_max)
-        lat_min = _finite_float_option("lat_min", self.lat_min)
-        lat_max = _finite_float_option("lat_max", self.lat_max)
-        if not -180.0 <= lon_min <= 180.0:
-            raise ValueError("lon_min must be within [-180, 180]")
-        if not -180.0 <= lon_max <= 180.0:
-            raise ValueError("lon_max must be within [-180, 180]")
-        if not -90.0 <= lat_min <= 90.0 or not -90.0 <= lat_max <= 90.0:
-            raise ValueError("lat bounds must be within [-90, 90]")
-        if lat_min > lat_max:
-            raise ValueError("lat_min must be less than or equal to lat_max")
+        parent = parse_grid_spec(self.parent) if isinstance(self.parent, str) else self.parent
+        if not isinstance(parent, GlobalGridSpec):
+            raise TypeError("limited-area parent must be a global grid spec or grid name")
+        region = _normalize_region(self.region)
         if not isinstance(self.boundary_depth, int) or isinstance(self.boundary_depth, bool):
             raise TypeError("boundary_depth must be a non-negative integer")
         if self.boundary_depth < 0:
             raise ValueError("boundary_depth must be non-negative")
+        object.__setattr__(self, "parent", parent)
+        object.__setattr__(self, "region", region)
         object.__setattr__(self, "parent_grid_name", parent.name)
         if not self.name:
             object.__setattr__(self, "name", f"LAM_{parent.name}")
@@ -603,7 +592,7 @@ class LimitedAreaGridSpec:
 
 
 @dataclass(frozen=True)
-class LonLatBoxRegion:
+class _LonLatBoxRegion:
     """Select cells whose centers fall in a longitude/latitude box."""
 
     lon_min: float
@@ -629,7 +618,7 @@ class LonLatBoxRegion:
 
 
 @dataclass(frozen=True)
-class CircleRegion:
+class _CircleRegion:
     """Select cells within an angular radius of a lon/lat center."""
 
     lon: float
@@ -652,7 +641,7 @@ class CircleRegion:
 
 
 @dataclass(frozen=True)
-class OrientedRectangleRegion:
+class _OrientedRectangleRegion:
     """Select cells inside a rotated local lon/lat rectangle."""
 
     center_lon: float
@@ -681,7 +670,7 @@ class OrientedRectangleRegion:
 
 
 @dataclass(frozen=True)
-class PolygonRegion:
+class _PolygonRegion:
     """Select cells inside a lon/lat polygon."""
 
     points: tuple[tuple[float, float], ...]
@@ -700,28 +689,93 @@ class PolygonRegion:
         object.__setattr__(self, "points", tuple(normalized))
 
 
+class Region:
+    """Factory namespace for public grid-cut and limited-area region specs."""
+
+    @staticmethod
+    def lonlat_box(
+        *,
+        lon_min: float,
+        lon_max: float,
+        lat_min: float,
+        lat_max: float,
+    ) -> _LonLatBoxRegion:
+        return _LonLatBoxRegion(
+            lon_min=lon_min,
+            lon_max=lon_max,
+            lat_min=lat_min,
+            lat_max=lat_max,
+        )
+
+    @staticmethod
+    def circle(*, lon: float, lat: float, radius_degrees: float) -> _CircleRegion:
+        return _CircleRegion(lon=lon, lat=lat, radius_degrees=radius_degrees)
+
+    @staticmethod
+    def rectangle(
+        *,
+        center_lon: float,
+        center_lat: float,
+        width_degrees: float,
+        height_degrees: float,
+        angle_degrees: float = 0.0,
+    ) -> _OrientedRectangleRegion:
+        return _OrientedRectangleRegion(
+            center_lon=center_lon,
+            center_lat=center_lat,
+            width_degrees=width_degrees,
+            height_degrees=height_degrees,
+            angle_degrees=angle_degrees,
+        )
+
+    @staticmethod
+    def polygon(points: tuple[tuple[float, float], ...]) -> _PolygonRegion:
+        return _PolygonRegion(points=points)
+
+
+_RegionSpec = _LonLatBoxRegion | _CircleRegion | _OrientedRectangleRegion | _PolygonRegion
+
+
+def _normalize_region(region: Any) -> _RegionSpec:
+    supported_region_types = (
+        _LonLatBoxRegion,
+        _CircleRegion,
+        _OrientedRectangleRegion,
+        _PolygonRegion,
+    )
+    if not isinstance(region, supported_region_types):
+        raise TypeError("region must be created with Region")
+    return region
+
+
+def _normalize_regions(regions: Any) -> tuple[_RegionSpec, ...]:
+    if isinstance(regions, (_LonLatBoxRegion, _CircleRegion, _OrientedRectangleRegion, _PolygonRegion)):
+        normalized = (regions,)
+    else:
+        normalized = tuple(regions)
+    if not normalized:
+        raise ValueError("cut grid spec requires at least one region")
+    for region in normalized:
+        _normalize_region(region)
+    return normalized
+
+
+def _region_class_name(region: Any) -> str:
+    return region.__class__.__name__.removeprefix("_")
+
+
 @dataclass(frozen=True)
 class CutGridSpec:
     """Selection options for extracting a cut grid from an existing grid."""
 
-    regions: tuple[LonLatBoxRegion | CircleRegion | OrientedRectangleRegion | PolygonRegion, ...]
+    regions: Any
     mode: str = "keep"
     boundary_depth: int = 0
     smoothing_depth: int = 0
     name: str = ""
 
     def __post_init__(self) -> None:
-        regions = tuple(self.regions)
-        if not regions:
-            raise ValueError("cut grid spec requires at least one region")
-        supported_region_types = (
-            LonLatBoxRegion,
-            CircleRegion,
-            OrientedRectangleRegion,
-            PolygonRegion,
-        )
-        if not all(isinstance(region, supported_region_types) for region in regions):
-            raise TypeError("cut grid regions must be supported region spec instances")
+        regions = _normalize_regions(self.regions)
         if self.mode not in {"keep", "remove"}:
             raise ValueError("cut mode must be 'keep' or 'remove'")
         for name, value in {
@@ -757,46 +811,41 @@ class IconGridOptions:
 
     max_cells: int | None = 2_000_000
     accelerator: str = "auto"
-    global_grid: GlobalGridOptions = field(default_factory=GlobalGridOptions)
-    global_optimization: GlobalOptimizationOptions = field(
-        default_factory=lambda: GlobalOptimizationOptions(
-            method="spring",
-            iterations=2000,
-        )
-    )
     radius: float = 1.0
     sphere_radius: float = EARTH_RADIUS_M
+    optimize_global: bool = True
+    spring_beta: float = 0.9
+    spring_iterations: int = 2000
+    fixed_boundary: bool = True
+    north_pole_lon: float = 0.0
+    north_pole_lat: float = 90.0
+    rotation_angle_degrees: float = 0.0
+    indexing: str = "new"
+    centre: int = 78
+    subcentre: int = 255
+    number_of_grid_used: int = 0
 
     def __post_init__(self) -> None:
-        global_grid = self.global_grid
-        if isinstance(global_grid, Mapping):
-            global_grid = GlobalGridOptions(**dict(global_grid))
-        if not isinstance(global_grid, GlobalGridOptions):
-            raise TypeError("global_grid must be a GlobalGridOptions instance or mapping")
-        object.__setattr__(
-            self,
-            "global_grid",
-            global_grid,
+        if not isinstance(self.optimize_global, bool):
+            raise TypeError("optimize_global must be a boolean")
+        global_grid = _GlobalGridOptions(
+            beta_spring=self.spring_beta,
+            maxit=self.spring_iterations,
+            fixed_boundary=self.fixed_boundary,
+            north_pole_lon=self.north_pole_lon,
+            north_pole_lat=self.north_pole_lat,
+            rotation_angle_degrees=self.rotation_angle_degrees,
+            indexing_algorithm=self.indexing,
+            centre=self.centre,
+            subcentre=self.subcentre,
+            number_of_grid_used=self.number_of_grid_used,
         )
-        global_optimization = resolve_global_optimization_options(self.global_optimization)
-        if (
-            global_optimization.method == "spring"
-            and global_optimization.iterations == 2000
-        ):
-            global_optimization = GlobalOptimizationOptions(
-                method="spring",
-                iterations=global_grid.maxit,
-            )
-        if (
-            global_optimization.method == "none"
-            and global_optimization.iterations == 2000
-        ):
-            global_optimization = GlobalOptimizationOptions(method="none", iterations=0)
-        object.__setattr__(
-            self,
-            "global_optimization",
-            global_optimization,
+        global_optimization = _GlobalOptimizationOptions(
+            method="spring" if self.optimize_global else "none",
+            iterations=global_grid.maxit if self.optimize_global else 0,
         )
+        object.__setattr__(self, "global_grid", global_grid)
+        object.__setattr__(self, "global_optimization", global_optimization)
 
 
 @dataclass(frozen=True)
@@ -929,21 +978,28 @@ def generate_grid(
     if not isinstance(grid_spec, _SUPPORTED_GRID_SPEC_TYPES):
         raise TypeError("spec must be an ICON R<n>B<k> string or a supported grid spec")
     resolved_options = _resolve_options(options)
-    explicit_global_optimization = (
-        isinstance(options, Mapping) and "global_optimization" in options
-    )
+    explicit_optimize_global = isinstance(options, Mapping) and "optimize_global" in options
     if (
         not isinstance(grid_spec, GlobalGridSpec)
         and resolved_options.global_optimization.method == "spring"
-        and not explicit_global_optimization
+        and not explicit_optimize_global
     ):
         resolved_options = IconGridOptions(
             max_cells=resolved_options.max_cells,
             accelerator=resolved_options.accelerator,
-            global_grid=resolved_options.global_grid,
-            global_optimization=GlobalOptimizationOptions(method="none"),
             radius=resolved_options.radius,
             sphere_radius=resolved_options.sphere_radius,
+            optimize_global=False,
+            spring_beta=resolved_options.spring_beta,
+            spring_iterations=resolved_options.spring_iterations,
+            fixed_boundary=resolved_options.fixed_boundary,
+            north_pole_lon=resolved_options.north_pole_lon,
+            north_pole_lat=resolved_options.north_pole_lat,
+            rotation_angle_degrees=resolved_options.rotation_angle_degrees,
+            indexing=resolved_options.indexing,
+            centre=resolved_options.centre,
+            subcentre=resolved_options.subcentre,
+            number_of_grid_used=resolved_options.number_of_grid_used,
         )
     _validate_options(grid_spec, resolved_options)
 
@@ -1119,7 +1175,7 @@ def _generate_staged_global_grid(
         return grid
     return optimize_global_grid(
         grid,
-        GlobalOptimizationOptions(method="spring", iterations=stage_iterations),
+        _GlobalOptimizationOptions(method="spring", iterations=stage_iterations),
     )
 
 
@@ -1729,7 +1785,7 @@ def _rotate_points(
     return _normalize_rows(rotated)
 
 
-def _apply_global_grid_rotation(points: np.ndarray, options: GlobalGridOptions) -> np.ndarray:
+def _apply_global_grid_rotation(points: np.ndarray, options: _GlobalGridOptions) -> np.ndarray:
     """Apply compatible pole placement and north-pole rotation."""
 
     if (
@@ -1742,8 +1798,8 @@ def _apply_global_grid_rotation(points: np.ndarray, options: GlobalGridOptions) 
     return _normalize_rows(points @ matrix.T)
 
 
-def _global_grid_rotation_matrix(options: GlobalGridOptions) -> np.ndarray:
-    default = _global_grid_seed_vertices(GlobalGridOptions())
+def _global_grid_rotation_matrix(options: _GlobalGridOptions) -> np.ndarray:
+    default = _global_grid_seed_vertices(_GlobalGridOptions())
     target = _global_grid_seed_vertices(options)
     u, _, vt = np.linalg.svd(default.T @ target)
     matrix = vt.T @ u.T
@@ -1753,7 +1809,7 @@ def _global_grid_rotation_matrix(options: GlobalGridOptions) -> np.ndarray:
     return matrix
 
 
-def _global_grid_seed_vertices(options: GlobalGridOptions) -> np.ndarray:
+def _global_grid_seed_vertices(options: _GlobalGridOptions) -> np.ndarray:
     phi = (1.0 + np.sqrt(5.0)) / 2.0
     vertices = _normalize_rows(
         np.asarray(
@@ -1781,7 +1837,7 @@ def _global_grid_seed_vertices(options: GlobalGridOptions) -> np.ndarray:
     return _raw_global_grid_rotation(rotated, options)
 
 
-def _raw_global_grid_rotation(points: np.ndarray, options: GlobalGridOptions) -> np.ndarray:
+def _raw_global_grid_rotation(points: np.ndarray, options: _GlobalGridOptions) -> np.ndarray:
     rotated = _unrotate_latlon(
         points,
         options.north_pole_lon,
@@ -3135,10 +3191,7 @@ def _metadata(
             {
                 "grid_geometry": 3,
                 "parent_grid_name": spec.parent_grid_name,
-                "lon_min": spec.lon_min,
-                "lon_max": spec.lon_max,
-                "lat_min": spec.lat_min,
-                "lat_max": spec.lat_max,
+                "limited_area_region": _region_class_name(spec.region),
                 "boundary_depth_index": spec.boundary_depth,
             }
         )
@@ -3204,12 +3257,7 @@ def _spec_uuid(
             {
                 "family": "limited_area",
                 "parent_grid_name": spec.parent_grid_name,
-                "bounds": [
-                    _canonical_float(spec.lon_min),
-                    _canonical_float(spec.lon_max),
-                    _canonical_float(spec.lat_min),
-                    _canonical_float(spec.lat_max),
-                ],
+                "region": _canonicalize_payload(asdict(spec)["region"]),
                 "boundary_depth": spec.boundary_depth,
             }
         )
@@ -3257,32 +3305,20 @@ def grid_uuid(
     grid_name: str,
     *,
     sphere_radius: float = EARTH_RADIUS_M,
-    global_grid: GlobalGridOptions | Mapping[str, Any] | None = None,
-    global_optimization: GlobalOptimizationOptions | Mapping[str, Any] | str | None = None,
+    options: IconGridOptions | Mapping[str, Any] | None = None,
 ) -> str:
     canonical_sphere_radius = finite_float_option("sphere_radius", sphere_radius)
     if canonical_sphere_radius <= 0.0:
         raise ValueError("sphere_radius must be positive")
-    grid_options = global_grid
-    if grid_options is None:
-        grid_options = GlobalGridOptions()
-    elif isinstance(grid_options, Mapping):
-        grid_options = GlobalGridOptions(**dict(grid_options))
-    if not isinstance(grid_options, GlobalGridOptions):
-        raise TypeError("global_grid must be None, a GlobalGridOptions instance, or a mapping")
-    if global_optimization is None:
-        optimization_options = GlobalOptimizationOptions(
-            method="spring",
-            iterations=grid_options.maxit,
-        )
-    else:
-        optimization_options = resolve_global_optimization_options(global_optimization)
+    grid_options = _resolve_options(options)
+    if sphere_radius != EARTH_RADIUS_M:
+        grid_options = replace(grid_options, sphere_radius=canonical_sphere_radius)
     payload = {
         "generator": "grid_generator",
         "grid": parse_grid_spec(grid_name).name,
         "sphere_radius": _canonical_float(canonical_sphere_radius),
-        "global_grid": _canonicalize_payload(asdict(grid_options)),
-        "global_optimization": _canonicalize_payload(asdict(optimization_options)),
+        "global_grid": _canonicalize_payload(asdict(grid_options.global_grid)),
+        "global_optimization": _canonicalize_payload(asdict(grid_options.global_optimization)),
     }
     return str(
         uuid.uuid5(

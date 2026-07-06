@@ -10,32 +10,22 @@ import grid_generator as grid_generator_package
 from grid_generator import _accelerated
 from grid_generator import (
     ChannelGridSpec,
-    CircleRegion,
     CutGridSpec,
-    DiffusionOptions,
-    GlobalGridOptions,
-    GlobalOptimizationOptions,
-    LonLatBoxRegion,
     IconGrid,
     IconGridOptions,
     GlobalGridSpec,
     LimitedAreaGridSpec,
-    OptimizationOptions,
-    OrientedRectangleRegion,
     ParallelogramGridSpec,
-    PolygonRegion,
-    RaggedOrthogonalGridSpec,
-    StretchedTorusGridSpec,
+    Region,
     TorusGridSpec,
+    generate_grid,
+)
+from grid_generator.cutting import cut_grid
+from grid_generator.diagnostics import (
     cell_divergence,
     cell_vorticity_fnorm,
     check_grid,
-    cut_grid,
-    diffuse_grid,
-    generate_grid,
     grid_statistics,
-    optimize_global_grid,
-    optimize_grid,
     triangle_properties,
 )
 from grid_generator import grid_generator as gg
@@ -45,41 +35,28 @@ from grid_generator._ordering import IconOrderingBuilder
 from grid_generator._refinement import GlobalRefinementBuilder
 from grid_generator._topology import GlobalTopologyBuilder
 from grid_generator.grid_generator import parse_grid_spec
+from grid_generator.planar import RaggedOrthogonalGridSpec, StretchedTorusGridSpec
+from grid_generator.transforms import (
+    DiffusionOptions,
+    OptimizationOptions,
+    diffuse_grid,
+    optimize_global_grid,
+    optimize_grid,
+)
 
 
 def test_public_package_exports_only_supported_grid_api():
     assert grid_generator_package.__all__ == [
-        "ChannelGridSpec",
-        "CircleRegion",
-        "CutGridSpec",
-        "DiffusionOptions",
-        "GridCheckResult",
-        "GridStatistics",
-        "GlobalGridOptions",
-        "GlobalOptimizationOptions",
+        "generate_grid",
         "IconGrid",
         "IconGridOptions",
         "GlobalGridSpec",
-        "LimitedAreaGridSpec",
-        "LonLatBoxRegion",
-        "OptimizationOptions",
-        "OrientedRectangleRegion",
-        "ParallelogramGridSpec",
-        "PolygonRegion",
-        "RaggedOrthogonalGridSpec",
-        "StretchedTorusGridSpec",
-        "TriangleProperties",
         "TorusGridSpec",
-        "cell_divergence",
-        "cell_vorticity_fnorm",
-        "check_grid",
-        "cut_grid",
-        "diffuse_grid",
-        "generate_grid",
-        "grid_statistics",
-        "optimize_global_grid",
-        "optimize_grid",
-        "triangle_properties",
+        "ChannelGridSpec",
+        "ParallelogramGridSpec",
+        "LimitedAreaGridSpec",
+        "CutGridSpec",
+        "Region",
     ]
     assert "write_icon_grid" not in grid_generator_package.__all__
     assert not hasattr(grid_generator_package, "write_icon_grid")
@@ -88,17 +65,20 @@ def test_public_package_exports_only_supported_grid_api():
     assert not hasattr(grid_generator_package, "GridSpec")
     assert not hasattr(grid_generator_package, "IconGridSpec")
     assert not hasattr(grid_generator_package, "LimitedAreaSpec")
+    assert not hasattr(grid_generator_package, "StretchedTorusGridSpec")
+    assert not hasattr(grid_generator_package, "RaggedOrthogonalGridSpec")
+    assert not hasattr(grid_generator_package, "GlobalGridOptions")
+    assert not hasattr(grid_generator_package, "GlobalOptimizationOptions")
+    assert not hasattr(grid_generator_package, "optimize_grid")
+    assert not hasattr(grid_generator_package, "check_grid")
     assert grid_generator_package.IconGrid is IconGrid
     assert grid_generator_package.IconGridOptions is IconGridOptions
-    assert grid_generator_package.GlobalGridOptions is GlobalGridOptions
     assert grid_generator_package.GlobalGridSpec is GlobalGridSpec
     assert grid_generator_package.LimitedAreaGridSpec is LimitedAreaGridSpec
     assert grid_generator_package.TorusGridSpec is TorusGridSpec
     assert grid_generator_package.generate_grid is generate_grid
     assert grid_generator_package.ChannelGridSpec is ChannelGridSpec
-    assert grid_generator_package.optimize_global_grid is optimize_global_grid
-    assert grid_generator_package.optimize_grid is optimize_grid
-    assert grid_generator_package.check_grid is check_grid
+    assert grid_generator_package.Region is Region
 
 
 def assert_unit_sphere(points):
@@ -425,11 +405,13 @@ def test_generate_grid_accepts_all_public_grid_specs():
     ragged_grid = generate_grid(RaggedOrthogonalGridSpec(nx=3, ny=2, dx=1.0, dy=1.0))
     limited_area_grid = generate_grid(
         LimitedAreaGridSpec(
-            "R02B01",
-            lon_min=-30.0,
-            lon_max=30.0,
-            lat_min=-30.0,
-            lat_max=30.0,
+            parent="R02B01",
+            region=Region.lonlat_box(
+                lon_min=-30.0,
+                lon_max=30.0,
+                lat_min=-30.0,
+                lat_max=30.0,
+            ),
             boundary_depth=1,
         ),
         options={"max_cells": None},
@@ -459,32 +441,23 @@ def test_generate_grid_accepts_all_public_grid_specs():
         ({"max_cells": 3.14}, TypeError, "max_cells"),
         ({"max_cells": "100"}, TypeError, "max_cells"),
         ({"max_cells": 0}, ValueError, "max_cells must be positive"),
-        ({"global_grid": 1}, TypeError, "global_grid"),
-        ({"global_grid": {"beta_spring": 0.0}}, ValueError, "beta_spring"),
+        ({"optimize_global": 1}, TypeError, "optimize_global"),
+        ({"spring_beta": 0.0}, ValueError, "beta_spring"),
         (
-            {"global_grid": {"north_pole_lon": math.inf}},
+            {"north_pole_lon": math.inf},
             ValueError,
             "north_pole_lon",
         ),
         (
-            {"global_grid": {"rotation_angle_degrees": "0.05"}},
+            {"rotation_angle_degrees": "0.05"},
             TypeError,
             "rotation_angle_degrees",
         ),
         ({"accelerator": 1}, TypeError, "accelerator"),
         ({"accelerator": "fast"}, ValueError, "accelerator"),
-        ({"global_optimization": 1}, TypeError, "global_optimization"),
-        ({"global_optimization": "fast"}, ValueError, "global optimization method"),
-        (
-            {"global_optimization": {"method": "spring", "iterations": -1}},
-            ValueError,
-            "iterations",
-        ),
-        (
-            {"global_optimization": {"method": "spring", "iterations": 3.14}},
-            TypeError,
-            "iterations",
-        ),
+        ({"spring_iterations": -1}, ValueError, "maxit"),
+        ({"spring_iterations": 3.14}, TypeError, "maxit"),
+        ({"indexing": "fast"}, ValueError, "indexing_algorithm"),
     ],
 )
 def test_generate_grid_rejects_invalid_options(options, error, message):
@@ -495,13 +468,13 @@ def test_generate_grid_rejects_invalid_options(options, error, message):
 def test_global_spring_optimization_preserves_topology_and_improves_quality():
     raw = generate_grid(
         "R02B02",
-        options={"max_cells": None, "global_optimization": "none"},
+        options={"max_cells": None, "optimize_global": False},
     )
     optimized = generate_grid(
         "R02B02",
         options={
             "max_cells": None,
-            "global_optimization": "spring",
+            "spring_iterations": 250,
         },
     )
 
@@ -531,16 +504,13 @@ def test_global_spring_optimization_preserves_topology_and_improves_quality():
 def test_global_optimization_options_can_be_configured_and_called_directly():
     raw = generate_grid(
         "R02B01",
-        options={"max_cells": None, "global_optimization": "none"},
+        options={"max_cells": None, "optimize_global": False},
     )
-    options = GlobalOptimizationOptions(
-        method="spring",
-        iterations=20,
-    )
+    options = {"method": "spring", "iterations": 20}
     optimized = optimize_global_grid(raw, options)
     facade = generate_grid(
         "R02B01",
-        options={"max_cells": None, "global_optimization": options},
+        options={"max_cells": None, "spring_iterations": 20},
     )
 
     assert optimized.dims == raw.dims
@@ -552,7 +522,7 @@ def test_global_optimization_options_can_be_configured_and_called_directly():
 @pytest.mark.parametrize(
     ("grid_name", "options"),
     [
-        ("R02B02", {"global_grid": {"centre": 215, "subcentre": 0}}),
+        ("R02B02", {"centre": 215, "subcentre": 0}),
         ("R02B04", None),
     ],
 )
@@ -564,7 +534,7 @@ def test_default_global_generation_uses_staged_spring_relaxation(grid_name, opti
 
 
 def test_raw_global_generation_bypasses_staged_spring_relaxation():
-    raw = generate_grid("R02B02", options={"global_optimization": "none"})
+    raw = generate_grid("R02B02", options={"optimize_global": False})
     relaxed = generate_grid("R02B02")
 
     assert raw.metadata["global_optimization"] == "none"
@@ -627,7 +597,7 @@ def test_global_optimization_is_rejected_for_planar_specs():
     with pytest.raises(ValueError, match="only supported for global grids"):
         generate_grid(
             TorusGridSpec(nx=4, ny=4, edge_length=1.0),
-            options={"global_optimization": "spring"},
+            options={"optimize_global": True},
         )
 
 
@@ -688,14 +658,13 @@ def test_numba_accelerator_is_optional_and_matches_numpy_when_available():
         ({"sphere_radius": 0.0}, ValueError, "sphere_radius must be positive"),
         ({"sphere_radius": math.nan}, ValueError, "sphere_radius must be finite"),
         ({"sphere_radius": math.inf}, ValueError, "sphere_radius must be finite"),
-        ({"global_grid": 1}, TypeError, "global_grid"),
-        ({"global_grid": {"north_pole_lat": math.inf}}, ValueError, "north_pole_lat"),
+        ({"options": {"north_pole_lat": math.inf}}, ValueError, "north_pole_lat"),
         (
-            {"global_grid": {"rotation_angle_degrees": "0.05"}},
+            {"options": {"rotation_angle_degrees": "0.05"}},
             TypeError,
             "rotation_angle_degrees",
         ),
-        ({"global_optimization": 1}, TypeError, "global_optimization"),
+        ({"options": {"optimize_global": 1}}, TypeError, "optimize_global"),
     ],
 )
 def test_grid_uuid_rejects_invalid_numeric_inputs(kwargs, error, message):
@@ -786,8 +755,8 @@ def test_internal_generation_pipeline_matches_public_facade():
     spec = parse_grid_spec("R01B01")
     options = IconGridOptions(
         sphere_radius=3.0,
-        global_grid=GlobalGridOptions(rotation_angle_degrees=0.05),
-        global_optimization="none",
+        rotation_angle_degrees=0.05,
+        optimize_global=False,
     )
     grid = generate_grid(spec.name, options=options)
     context = gg._GlobalGenerationContext()
@@ -836,11 +805,11 @@ def test_global_grid_rotation_defaults_to_unrotated_and_can_be_enabled():
     unrotated = generate_grid("R01B01")
     rotated = generate_grid(
         "R01B01",
-        options={"global_grid": {"rotation_angle_degrees": 0.05}},
+        options={"rotation_angle_degrees": 0.05},
     )
 
-    assert unrotated.options.global_grid.rotation_angle_degrees == 0.0
-    assert rotated.options.global_grid.rotation_angle_degrees == 0.05
+    assert unrotated.options.rotation_angle_degrees == 0.0
+    assert rotated.options.rotation_angle_degrees == 0.05
     assert np.array_equal(rotated.cells, unrotated.cells)
     assert np.array_equal(rotated.edges, unrotated.edges)
     assert not np.allclose(rotated.vertices, unrotated.vertices)
@@ -970,11 +939,13 @@ def test_stretched_torus_rejects_degenerate_periodic_dimensions():
 
 def test_limited_area_grid_is_compact_boundary_ordered_and_parent_linked():
     spec = LimitedAreaGridSpec(
-        "R02B01",
-        lon_min=-20.0,
-        lon_max=20.0,
-        lat_min=-20.0,
-        lat_max=20.0,
+        parent="R02B01",
+        region=Region.lonlat_box(
+            lon_min=-20.0,
+            lon_max=20.0,
+            lat_min=-20.0,
+            lat_max=20.0,
+        ),
         boundary_depth=1,
     )
     grid = generate_grid(spec, options={"max_cells": None})
@@ -1005,16 +976,16 @@ def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
     parent = generate_grid("R02B01", options={"max_cells": None})
     keep_spec = CutGridSpec(
         regions=(
-            CircleRegion(lon=0.0, lat=0.0, radius_degrees=35.0),
-            LonLatBoxRegion(lon_min=-20.0, lon_max=20.0, lat_min=-15.0, lat_max=15.0),
-            OrientedRectangleRegion(
+            Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0),
+            Region.lonlat_box(lon_min=-20.0, lon_max=20.0, lat_min=-15.0, lat_max=15.0),
+            Region.rectangle(
                 center_lon=0.0,
                 center_lat=0.0,
                 width_degrees=30.0,
                 height_degrees=20.0,
                 angle_degrees=20.0,
             ),
-            PolygonRegion(points=((-35.0, -5.0), (0.0, 30.0), (35.0, -5.0))),
+            Region.polygon(points=((-35.0, -5.0), (0.0, 30.0), (35.0, -5.0))),
         ),
         boundary_depth=1,
         smoothing_depth=2,
@@ -1024,7 +995,7 @@ def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
     remove = cut_grid(
         parent,
         CutGridSpec(
-            regions=(CircleRegion(lon=0.0, lat=0.0, radius_degrees=35.0),),
+            regions=Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0),
             mode="remove",
         ),
     )
@@ -1047,7 +1018,12 @@ def test_cut_grid_boundary_expansion_ignores_open_grid_missing_neighbors():
     cut = cut_grid(
         parent,
         CutGridSpec(
-            regions=(LonLatBoxRegion(lon_min=-180.0, lon_max=-60.0, lat_min=-90.0, lat_max=-60.0),),
+            regions=Region.lonlat_box(
+                lon_min=-180.0,
+                lon_max=-60.0,
+                lat_min=-90.0,
+                lat_max=-60.0,
+            ),
             boundary_depth=1,
         ),
     )
@@ -1057,7 +1033,7 @@ def test_cut_grid_boundary_expansion_ignores_open_grid_missing_neighbors():
 
 
 def test_cut_grid_spec_rejects_unsupported_region_objects():
-    with pytest.raises(TypeError, match="supported region spec"):
+    with pytest.raises(TypeError, match="Region"):
         CutGridSpec(regions=("not-a-region",))
 
 
@@ -1503,7 +1479,7 @@ def test_edge_system_orientation_makes_normals_point_from_first_to_second_cell()
 
 
 def test_global_convention_keeps_positive_edge_system_orientation():
-    grid = generate_grid("R02B04", options={"global_grid": {"maxit": 1}})
+    grid = generate_grid("R02B04", options={"spring_iterations": 1})
     vertices = unit_rows(grid.vertices)
     centers = unit_rows(grid.cell_center_xyz)
     edge_centers = unit_rows(grid.edge_center_xyz)
@@ -1520,11 +1496,11 @@ def test_global_convention_keeps_positive_edge_system_orientation():
 
 
 def test_shifted_pole_rotation_matrix_matches_contract():
-    options = GlobalGridOptions(
+    options = IconGridOptions(
         north_pole_lon=15.0,
         north_pole_lat=75.0,
         rotation_angle_degrees=37.5,
-    )
+    ).global_grid
 
     assert np.allclose(
         gg._global_grid_rotation_matrix(options),
@@ -1713,7 +1689,7 @@ def test_metadata_uses_stable_uuid_and_metric_means():
         "R02B01",
         options={
             "sphere_radius": 9.0,
-            "global_grid": {"rotation_angle_degrees": 0.05},
+            "rotation_angle_degrees": 0.05,
         },
     )
     display_scaled = generate_grid(
