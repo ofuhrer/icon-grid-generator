@@ -140,6 +140,167 @@ def expected_edge_system_orientation(grid):
     return np.where(outward_component > 0.0, 1, -1).astype(np.int32)
 
 
+GLOBAL_RELAXATION_SNAPSHOTS = {
+    "R02B02": {
+        "coordinates": {
+            "cells": [
+                [-0.9972766427313585, 1.2213116483853766e-16, 0.07375159566050225],
+                [-0.0007245100163799303, -0.7250902788999919, 0.6886534415291687],
+                [0.9972766427257168, -1.226463717588987e-16, -0.0737515957367906],
+            ],
+            "edges": [
+                [-0.9980032647133953, -0.03975230771934482, 0.04908398570197008],
+                [-0.0017330106148963427, -0.9236895705201995, 0.383137800257842],
+                [0.9980032646925895, 0.039752307641365794, -0.049083986188157874],
+            ],
+            "vertices": [
+                [-0.9998905285231824, 1.2245127352536707e-16, -0.01479631608309715],
+                [-5.851658108239274e-09, 1.0953727274925692e-16, 1.0],
+                [0.9998905285183876, 4.176294833076613e-16, 0.014796316407119888],
+            ],
+        },
+        "metrics": {
+            "cell_area": [
+                334455830974.8723,
+                373499669297.1764,
+                395086529658.12134,
+                400748023387.92334,
+                402345307710.89734,
+                405184839120.001,
+                410670878396.2804,
+                413398864029.7295,
+                423588523345.1393,
+            ],
+            "dual_edge_length": [
+                398089.78549738013,
+                471391.519156158,
+                508539.20373929123,
+                534028.1209502177,
+                550110.3909770866,
+                582849.0214484674,
+                607945.7344405836,
+                627791.9882128286,
+                647510.7180244914,
+            ],
+            "edge_cell_distance": [
+                161788.83798968507,
+                243300.02701519613,
+                256046.8527435893,
+                265239.16919482104,
+                282622.43340112607,
+                288684.8784495073,
+                303972.86772788863,
+                319053.33939860546,
+                323755.35907112143,
+            ],
+            "edge_length": [
+                838004.9203659653,
+                914946.1134868287,
+                922771.4117992753,
+                958450.2840412285,
+                965223.3426980093,
+                984220.5540255363,
+                999964.4123921479,
+                1003757.022946344,
+                1011276.1609523273,
+            ],
+        },
+    },
+    "R02B04": {
+        "coordinates": {
+            "cells": [
+                [-0.9999726130327524, 2.786923611539062e-15, 0.007400890787543893],
+                [-3.7112756342732476e-05, -0.8121082181193181, 0.5835068471626612],
+                [0.9999726130342036, 8.311396524546055e-17, -0.007400890591470153],
+            ],
+            "edges": [
+                [-0.9999502825338646, -0.00988773966361991, 0.0012903738949580188],
+                [-0.00010628419052694703, -0.83447960535123, -0.551038816197667],
+                [0.9999502825341648, 0.009887739647363187, -0.001290373786913602],
+            ],
+            "vertices": [
+                [-0.9998918416038874, 1.010533790078164e-15, -0.014707314302296805],
+                [-5.302317535208647e-09, -7.412125961010718e-16, 1.0],
+                [0.9998918415996828, -6.878558226253009e-16, 0.014707314588149377],
+            ],
+        },
+        "metrics": {
+            "cell_area": [
+                18776260998.262985,
+                23800601803.3689,
+                24583400115.7571,
+                25021682703.170013,
+                25283642484.151394,
+                25474817831.921032,
+                25561939708.756954,
+                25692650375.074226,
+                25973307559.66683,
+            ],
+            "dual_edge_length": [
+                91477.0435846128,
+                121215.54128864895,
+                128177.01938581436,
+                132022.931804176,
+                137611.61619351737,
+                145012.18596433106,
+                152462.67431252258,
+                157997.06515464923,
+                162013.55548335367,
+            ],
+            "edge_cell_distance": [
+                37971.55139856784,
+                60601.37924319611,
+                64105.592291782465,
+                66061.38046768436,
+                69053.92384079934,
+                72356.39201979684,
+                76077.35330314182,
+                79174.657822828,
+                81006.77774523124,
+            ],
+            "edge_length": [
+                198699.8369479145,
+                228171.23421985135,
+                232809.04562551054,
+                237704.8107192587,
+                242417.07603140824,
+                246434.95949836235,
+                248953.8877056851,
+                250582.24354055093,
+                252917.57302064548,
+            ],
+        },
+    },
+}
+
+
+def sorted_value_samples(values, count):
+    sorted_values = np.sort(np.asarray(values).ravel())
+    return sorted_values[np.linspace(0, sorted_values.size - 1, count, dtype=int)]
+
+
+def assert_global_relaxation_snapshot(grid):
+    snapshot = GLOBAL_RELAXATION_SNAPSHOTS[grid.name]
+    coordinate_sources = {
+        "vertices": unit_rows(grid.vertices),
+        "cells": unit_rows(grid.cell_center_xyz),
+        "edges": unit_rows(grid.edge_center_xyz),
+    }
+    for name, rows in coordinate_sources.items():
+        expected = np.asarray(snapshot["coordinates"][name], dtype=np.float64)
+        distances = np.linalg.norm(
+            rows[np.newaxis, :, :] - expected[:, np.newaxis, :],
+            axis=2,
+        )
+        assert np.max(np.min(distances, axis=1)) <= 1.0e-8
+
+    for name, expected_values in snapshot["metrics"].items():
+        actual = sorted_value_samples(grid.geometry[name], len(expected_values))
+        expected = np.asarray(expected_values, dtype=np.float64)
+        scale = max(float(np.max(np.abs(actual))), float(np.max(np.abs(expected))), 1.0)
+        assert np.max(np.abs(actual - expected)) / scale <= 2.0e-8
+
+
 def local_east_north(points):
     unit_points = unit_rows(points)
     lon = np.arctan2(unit_points[:, 1], unit_points[:, 0])
@@ -386,6 +547,80 @@ def test_global_optimization_options_can_be_configured_and_called_directly():
     assert facade.metadata["global_optimization_iterations"] == 20
     assert np.all(np.isfinite(optimized.geometry["cell_area"]))
     assert not np.allclose(optimized.vertices, raw.vertices)
+
+
+@pytest.mark.parametrize(
+    ("grid_name", "options"),
+    [
+        ("R02B02", {"global_grid": {"centre": 215, "subcentre": 0}}),
+        ("R02B04", None),
+    ],
+)
+def test_default_global_generation_uses_staged_spring_relaxation(grid_name, options):
+    grid = generate_grid(grid_name, options=options)
+
+    assert_global_relaxation_snapshot(grid)
+    assert grid.metadata["global_optimization"] == "spring"
+
+
+def test_raw_global_generation_bypasses_staged_spring_relaxation():
+    raw = generate_grid("R02B02", options={"global_optimization": "none"})
+    relaxed = generate_grid("R02B02")
+
+    assert raw.metadata["global_optimization"] == "none"
+    assert np.array_equal(raw.cells, relaxed.cells)
+    assert np.array_equal(raw.edges, relaxed.edges)
+    assert np.array_equal(raw.cell_edges, relaxed.cell_edges)
+    assert np.array_equal(raw.edge_cells, relaxed.edge_cells)
+    assert not np.allclose(raw.vertices, relaxed.vertices)
+
+    raw_cell_cv = np.std(raw.geometry["cell_area"]) / np.mean(raw.geometry["cell_area"])
+    relaxed_cell_cv = np.std(relaxed.geometry["cell_area"]) / np.mean(
+        relaxed.geometry["cell_area"]
+    )
+    assert relaxed_cell_cv < raw_cell_cv
+
+
+@pytest.mark.parametrize("grid_name", ["R02B02", "R02B04"])
+def test_staged_global_generation_preserves_connectivity_contract(grid_name):
+    grid = generate_grid(grid_name)
+
+    assert grid.dims == {
+        "cell": grid.spec.expected_cells,
+        "vertex": grid.spec.expected_vertices,
+        "edge": grid.spec.expected_edges,
+    }
+    assert np.array_equal(grid.connectivity["edge_of_cell"], grid.icon_connectivity["c2e"])
+    assert np.array_equal(grid.connectivity["vertex_of_cell"], grid.cells)
+    assert np.array_equal(grid.connectivity["edge_vertices"], grid.edges)
+    assert np.array_equal(grid.connectivity["adjacent_cell_of_edge"], grid.edge_cells)
+    assert np.array_equal(
+        grid.geometry["edge_system_orientation"],
+        np.ones(grid.dims["edge"], dtype=np.int32),
+    )
+
+    for cell_index, cell in enumerate(grid.cells):
+        for local_index, pair in enumerate(
+            ((cell[0], cell[1]), (cell[1], cell[2]), (cell[2], cell[0]))
+        ):
+            edge_index = grid.cell_edges[cell_index, local_index]
+            assert set(map(int, pair)) == set(map(int, grid.edges[edge_index]))
+            expected_orientation = 1 if grid.edge_cells[edge_index, 0] == cell_index else -1
+            assert grid.geometry["orientation_of_normal"][cell_index, local_index] == (
+                expected_orientation
+            )
+
+    parent = generate_grid(
+        f"R{grid.spec.root:02d}B{grid.spec.bisections - 1:02d}",
+    )
+    assert np.all(
+        (1 <= grid.refinement["parent_cell_index"])
+        & (grid.refinement["parent_cell_index"] <= parent.dims["cell"])
+    )
+    assert np.all(
+        (1 <= grid.refinement["parent_edge_index"])
+        & (grid.refinement["parent_edge_index"] <= parent.dims["edge"])
+    )
 
 
 def test_global_optimization_is_rejected_for_planar_specs():

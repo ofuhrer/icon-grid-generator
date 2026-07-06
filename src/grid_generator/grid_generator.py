@@ -106,6 +106,7 @@ EDGE_CHILD_TYPE_FROM_VERTEX_1 = 102
 EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_0 = 201
 EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_1 = 202
 EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_2 = 203
+GLOBAL_RELAXATION_LONG_ITER_CELL_THRESHOLD = 100_000
 CELL_COORD_ATTRS = {
     "coordinates": "clon clat",
     "grid_type": "unstructured",
@@ -1078,8 +1079,91 @@ def _generate_grid(
     if cached is not None:
         return cached
 
+    if options.global_optimization.method == "spring":
+        grid = _generate_staged_global_grid(spec, options, context)
+    else:
+        grid = _generate_raw_global_grid(spec, options, context)
+    context.grids[cache_key] = grid
+    return grid
+
+
+def _generate_raw_global_grid(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    context: _GlobalGenerationContext,
+) -> IconGrid:
     geometry = SphericalIcosahedralGeometry().build(spec, options)
     geometry = IconOrderingBuilder(context).order_spherical_bisection(spec, options, geometry)
+    return _assemble_global_grid(spec, options, geometry, context)
+
+
+def _generate_staged_global_grid(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    context: _GlobalGenerationContext,
+) -> IconGrid:
+    if spec.bisections == 0:
+        return _generate_raw_global_grid(spec, options, context)
+
+    parent_spec = GlobalGridSpec(root=spec.root, bisections=spec.bisections - 1)
+    parent = _generate_grid(parent_spec, options, context)
+    vertices, cells, provenance = _refine_triangles_bisection_with_provenance(
+        parent.vertices,
+        parent.cells,
+    )
+    vertices = vertices * options.radius
+    geometry = _geometry_from_vertices(spec, options, vertices, cells, provenance)
+    grid = _assemble_global_grid(spec, options, geometry, context)
+    stage_iterations = _stage_global_optimization_iterations(options, parent)
+    if stage_iterations == 0:
+        return grid
+    return optimize_global_grid(
+        grid,
+        GlobalOptimizationOptions(method="spring", iterations=stage_iterations),
+    )
+
+
+def _geometry_from_vertices(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    vertices: np.ndarray,
+    cells: np.ndarray,
+    provenance: BisectionProvenance | None,
+) -> GeometryData:
+    _check_expected_counts(spec, vertices, cells)
+    vertex_lon, vertex_lat = _lon_lat(vertices)
+    cell_center_xyz = _cell_centers(vertices, cells, options.radius)
+    lon, lat = _lon_lat(cell_center_xyz)
+    return GeometryData(
+        vertices=vertices,
+        cells=cells,
+        lon=lon,
+        lat=lat,
+        vertex_lon=vertex_lon,
+        vertex_lat=vertex_lat,
+        cell_center_xyz=cell_center_xyz,
+        cell_vertex_lon=vertex_lon[cells],
+        cell_vertex_lat=vertex_lat[cells],
+        bisection_provenance=provenance,
+    )
+
+
+def _stage_global_optimization_iterations(
+    options: IconGridOptions,
+    parent: IconGrid,
+) -> int:
+    iterations = options.global_optimization.iterations
+    if parent.dims["cell"] < GLOBAL_RELAXATION_LONG_ITER_CELL_THRESHOLD:
+        return iterations * 10
+    return iterations
+
+
+def _assemble_global_grid(
+    spec: GlobalGridSpec,
+    options: IconGridOptions,
+    geometry: GeometryData,
+    context: _GlobalGenerationContext,
+) -> IconGrid:
     topology = GlobalTopologyBuilder().build(spec, options, geometry)
     topology = _adjust_global_edge_orientation(
         spec,
@@ -1117,9 +1201,6 @@ def _generate_grid(
         refinement=refinement.fields,
         metadata=metadata,
     )
-    if options.global_optimization.method != "none":
-        grid = optimize_global_grid(grid, options.global_optimization)
-    context.grids[cache_key] = grid
     return grid
 
 
