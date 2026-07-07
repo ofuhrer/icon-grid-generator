@@ -1,8 +1,8 @@
 PYTHON ?= python
 
-.PHONY: check test perf-check lint docs package drift-check contract-compare clean
+.PHONY: check test perf-check lint docs docs-figures docs-figures-check package drift-check contract-compare clean
 
-check: lint test docs drift-check
+check: lint test docs-figures-check docs drift-check
 
 lint:
 	$(PYTHON) -m ruff check .
@@ -16,7 +16,13 @@ perf-check:
 docs:
 	$(PYTHON) -m mkdocs build --strict
 
-package:
+docs-figures:
+	$(PYTHON) scripts/generate_docs_figures.py
+
+docs-figures-check:
+	$(PYTHON) scripts/generate_docs_figures.py --check
+
+package: docs-figures-check
 	rm -rf dist build
 	$(PYTHON) -m build
 	$(PYTHON) -m twine check dist/*

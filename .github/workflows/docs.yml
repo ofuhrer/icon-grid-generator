@@ -8,6 +8,8 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "pyproject.toml"
+      - "scripts/generate_docs_figures.py"
+      - "src/grid_generator/**"
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +17,8 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "pyproject.toml"
+      - "scripts/generate_docs_figures.py"
+      - "src/grid_generator/**"
   workflow_dispatch:
 
 permissions:
@@ -45,6 +49,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[docs]"
+
+      - name: Check generated figures
+        run: make docs-figures-check
 
       - name: Build docs
         run: python -m mkdocs build --strict

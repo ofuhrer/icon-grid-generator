@@ -34,6 +34,7 @@ PYTHON_BADGE_RE = re.compile(
 PYTHON_CLASSIFIER_RE = re.compile(
     r'"Programming Language :: Python :: (3\.\d+)"'
 )
+MARKDOWN_SVG_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+\.svg)\)")
 
 EXPECTED_NETCDF_DIMS = {
     "cell": 20,
@@ -171,6 +172,26 @@ def test_example_scripts_execute(tmp_path, monkeypatch):
     }
     for svg_file in svg_files:
         assert "<line " in svg_file.read_text()
+
+
+def test_markdown_svg_images_are_checked_in_and_valid():
+    markdown_files = [PROJECT_ROOT / "README.md", *sorted((PROJECT_ROOT / "docs").glob("*.md"))]
+    image_paths: list[Path] = []
+
+    for markdown_file in markdown_files:
+        for match in MARKDOWN_SVG_IMAGE_RE.finditer(markdown_file.read_text()):
+            if re.match(r"https?://", match.group(1)):
+                continue
+            image_paths.append((markdown_file.parent / match.group(1)).resolve())
+
+    assert image_paths
+    for image_path in image_paths:
+        assert image_path.is_relative_to(PROJECT_ROOT)
+        assert image_path.exists()
+        text = image_path.read_text()
+        assert text.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+        assert "<svg " in text
+        assert "<line " in text
 
 
 def test_public_api_inventory_matches_documented_exports():

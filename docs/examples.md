@@ -2,7 +2,11 @@
 
 The examples below are complete snippets. They use small grids so they are fast
 to copy, paste, and run. Each grid-producing example writes an SVG edge plot
-with `grid_generator.visualization.write_svg`.
+with `grid_generator.visualization.write_svg`, and the checked-in figures below
+are generated from the same code path.
+
+Regenerate the figures with `make docs-figures`. `make check`, `make package`,
+and the release workflow verify that the checked-in figures are current.
 
 ## Output Directory
 
@@ -33,6 +37,8 @@ print(grid.dims)
 write_svg(grid, output / "global_r1b1.svg")
 ```
 
+![Optimized global R1B1 grid](assets/examples/global_r1b1.svg)
+
 ## NetCDF Export
 
 NetCDF export requires installing the optional extra:
@@ -55,6 +61,8 @@ write_svg(grid, output / "global_r1b1_netcdf.svg")
 grid.to_netcdf(output / "icon_grid_R01B01.nc")
 ```
 
+![Global R1B1 grid exported to NetCDF](assets/examples/global_r1b1_netcdf.svg)
+
 ## Raw Diagnostic Grid
 
 Raw grids skip global optimization. Use this for topology checks, not for normal
@@ -74,6 +82,8 @@ print(raw_grid.metadata["global_optimization"])
 write_svg(raw_grid, output / "global_r1b1_raw.svg")
 ```
 
+![Raw global R1B1 diagnostic grid](assets/examples/global_r1b1_raw.svg)
+
 ## Planar Torus
 
 `TorusGridSpec` creates a doubly periodic planar triangular grid.
@@ -92,6 +102,8 @@ print(grid.name)
 print(grid.metadata["domain_length"])
 write_svg(grid, output / "planar_torus.svg")
 ```
+
+![Planar torus grid](assets/examples/planar_torus.svg)
 
 ## Open Planar Grids
 
@@ -115,6 +127,10 @@ write_svg(channel, output / "planar_channel.svg")
 write_svg(parallelogram, output / "planar_parallelogram.svg")
 ```
 
+![Open planar channel grid](assets/examples/planar_channel.svg)
+
+![Open planar parallelogram grid](assets/examples/planar_parallelogram.svg)
+
 ## Advanced Planar Variants
 
 Advanced but supported planar variants live in `grid_generator.planar`.
@@ -136,6 +152,10 @@ ragged = generate_grid(RaggedOrthogonalGridSpec(nx=8, ny=5, dx=1_000.0, dy=800.0
 write_svg(stretched, output / "planar_stretched_torus.svg")
 write_svg(ragged, output / "planar_ragged_orthogonal.svg")
 ```
+
+![Stretched torus grid](assets/examples/planar_stretched_torus.svg)
+
+![Ragged orthogonal planar grid](assets/examples/planar_ragged_orthogonal.svg)
 
 ## Limited Area
 
@@ -162,6 +182,8 @@ print(grid.dims)
 write_svg(grid, output / "limited_area.svg")
 ```
 
+![Limited-area grid](assets/examples/limited_area.svg)
+
 ## Cut An Existing Grid
 
 For a single-region cut, pass the region directly.
@@ -181,6 +203,8 @@ cut = cut_grid(parent, Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0))
 print(cut.dims)
 write_svg(cut, output / "cut_circle.svg")
 ```
+
+![Circle cut grid](assets/examples/cut_circle.svg)
 
 Use `CutGridSpec` for multiple regions or non-default cut options.
 
@@ -210,6 +234,8 @@ cut = cut_grid(
 write_svg(cut, output / "cut_multi_region.svg")
 ```
 
+![Multi-region cut grid](assets/examples/cut_multi_region.svg)
+
 ## Diagnostics And Transforms
 
 Diagnostics inspect a grid without changing it. Transforms return a new grid
@@ -235,3 +261,5 @@ assert check.ok
 print(stats.cells, stats.boundary_edges)
 write_svg(optimized, output / "optimized_channel.svg")
 ```
+
+![Optimized channel grid](assets/examples/optimized_channel.svg)
