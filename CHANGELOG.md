@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Keep the root import surface focused while moving advanced cutting helpers to
+  `grid_generator.cutting`.
+- Allow common `generate_grid()` options to be passed directly as keyword
+  arguments.
+- Clarify and test `optimize_global` behavior across global, limited-area, and
+  planar grid specs.
+- Preserve planar geometry when optimizing or diffusing cut grids from planar
+  parents.
+- Add example scripts, type-marker packaging, and documentation updates for the
+  refactored public API.
+
 ## 0.2.1 - 2026-07-05
 
 Patch release for relaxed global grid generation.

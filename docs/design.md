@@ -110,12 +110,15 @@ edges    = 30 * f^2      = 30 * n^2 * 4^k
 vertices = 10 * f^2 + 2  = 10 * n^2 * 4^k + 2
 ```
 
-Generation time, peak memory, and NetCDF file size are therefore all expected
-to scale approximately as `O(n^2 * 4^k)` for sufficiently large global grids.
-Equivalently, each additional bisection level roughly multiplies work and
-output size by four.
+Raw topology/metric generation time, peak memory, and NetCDF file size are
+therefore all expected to scale approximately as `O(n^2 * 4^k)` for
+sufficiently large global grids. Equivalently, each additional bisection level
+roughly multiplies work and output size by four.
 
-The measured single-process generation-time model on the benchmark machine is:
+The measured single-process generation-time model below is calibrated for raw
+global generation with `optimize_global=False`. Default optimized global
+generation has the same asymptotic grid-size scaling, but its runtime constant
+depends on the spring-relaxation settings and is not represented by this model.
 
 ```text
 generation_seconds ~= 9.5e-5 * f^2

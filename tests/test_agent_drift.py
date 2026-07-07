@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import runpy
 import subprocess
 
 import numpy as np
@@ -146,6 +147,13 @@ def test_markdown_python_examples_execute(tmp_path, monkeypatch):
         for match in PYTHON_BLOCK_RE.finditer(markdown_file.read_text()):
             code = match.group(1)
             exec(compile(code, str(markdown_file), "exec"), namespace)
+
+
+def test_example_scripts_execute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    for example in sorted((PROJECT_ROOT / "examples").glob("*.py")):
+        runpy.run_path(str(example), run_name="__main__")
 
 
 def test_public_api_inventory_matches_documented_exports():

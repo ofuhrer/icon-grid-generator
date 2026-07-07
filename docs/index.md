@@ -15,15 +15,29 @@ grids without depending on ICON model runtimes or stencil frameworks.
 - In-memory geometry, topology, connectivity, metric, and refinement arrays for
   plotting, diagnostics, and downstream conversion.
 
-## Quick Example
+## Basic Usage
 
 ```python
 from grid_generator import generate_grid
 
-grid = generate_grid("R2B3")
+grid = generate_grid("R2B4")
+print(grid.name)
 print(grid.dims)
-print(grid.metadata["mean_edge_length"])
+grid.to_netcdf("icon_grid_R02B04.nc")
 ```
+
+Global grids are optimized by default. Pass `optimize_global=False` only for raw
+topology diagnostics.
+
+## Which Grid Should I Use?
+
+| Goal | Use |
+| --- | --- |
+| Standard spherical grid file | `generate_grid("R2B4")` |
+| Raw topology checks | `generate_grid("R2B4", optimize_global=False)` |
+| Periodic planar experiment | `TorusGridSpec(...)` |
+| Regional extract from a global parent | `LimitedAreaGridSpec(...)` |
+| Cut an existing grid | `grid_generator.cutting.cut_grid(...)` |
 
 ## Project Links
 

@@ -322,7 +322,7 @@ def _spring_target(
 
 def _project_vertices(grid: Any, vertices: np.ndarray) -> np.ndarray:
     projected = vertices.copy()
-    if grid.metadata.get("grid_geometry") == 2:
+    if _uses_planar_projection(grid):
         projected[:, 2] = grid.vertices[:, 2]
         if grid.metadata.get("periodic"):
             projected[:, 0] %= grid.spec.domain_length
@@ -337,11 +337,18 @@ def _project_vertices(grid: Any, vertices: np.ndarray) -> np.ndarray:
 
 
 def _rebuild_grid(grid: Any, vertices: np.ndarray) -> Any:
-    if grid.metadata.get("grid_geometry") == 2:
+    if _uses_planar_projection(grid):
         from ._planar import rebuild_planar_grid
 
         return rebuild_planar_grid(grid, vertices)
     return _rebuild_spherical_grid(grid, vertices)
+
+
+def _uses_planar_projection(grid: Any) -> bool:
+    return (
+        grid.metadata.get("grid_geometry") == 2
+        or grid.metadata.get("source_grid_geometry") == 2
+    )
 
 
 def _rebuild_spherical_grid(grid: Any, vertices: np.ndarray) -> Any:

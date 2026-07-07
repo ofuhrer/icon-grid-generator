@@ -2,7 +2,6 @@
 
 from .grid_generator import (
     ChannelGridSpec,
-    CutGridSpec,
     GlobalGridSpec,
     IconGrid,
     IconGridOptions,
@@ -22,6 +21,5 @@ __all__ = [
     "ChannelGridSpec",
     "ParallelogramGridSpec",
     "LimitedAreaGridSpec",
-    "CutGridSpec",
     "Region",
 ]

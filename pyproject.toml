@@ -50,6 +50,9 @@ test = ["pytest", "ruff", "netCDF4", "xarray"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/grid_generator"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/grid_generator/py.typed" = "grid_generator/py.typed"
+
 [tool.ruff]
 line-length = 88
 target-version = "py310"

@@ -14,19 +14,58 @@ ICON Grid Generator creates spherical ICON `R<n>B<k>` grids, planar triangular
 grids, limited-area extracts, and ICON-style NetCDF files without depending on
 ICON model runtimes or stencil frameworks.
 
-## Features
+## Quick Start
 
-- Generate global spherical ICON grids from names such as `R2B3`, canonicalized
-  to zero-padded names such as `R02B03`.
-- Generate spring-relaxed global grids for improved metric quality.
-- Generate planar doubly periodic torus grids and additional planar variants.
-- Extract limited-area grids from generated global parent grids.
-- Export ICON-style NetCDF grid files with optional `netCDF4` support.
-- Inspect in-memory topology, connectivity, geometry, refinement, and metadata
-  arrays for plotting or downstream conversion.
-- Run lightweight diagnostics and deterministic geometry postprocessing.
+Most users only need `generate_grid()`:
+
+```python
+from grid_generator import generate_grid
+
+grid = generate_grid("R2B4")
+print(grid.name)
+print(grid.dims)
+grid.to_netcdf("icon_grid_R02B04.nc")
+```
+
+Example output:
+
+```text
+R02B04
+{'cell': 20480, 'vertex': 10242, 'edge': 30720}
+```
+
+Global grids are optimized by default and are suitable for normal ICON-style
+grid-file use. Use `optimize_global=False` only when you explicitly need the
+raw bisection topology for diagnostics or tests.
+
+## What You Can Generate
+
+- Global spherical ICON grids from names such as `R2B4` or `R02B04`.
+- Planar triangular torus, channel, and parallelogram grids for experiments.
+- Limited-area grids extracted from generated global parent grids.
+- ICON-style NetCDF grid files when the optional `netCDF4` dependency is
+  installed.
+- In-memory topology, geometry, metric, refinement, and metadata arrays for
+  plotting, diagnostics, and downstream conversion.
+
+## Which Grid Should I Use?
+
+| Goal | Use |
+| --- | --- |
+| Standard spherical grid file | `generate_grid("R2B4")` |
+| Raw topology checks | `generate_grid("R2B4", optimize_global=False)` |
+| Periodic planar experiment | `TorusGridSpec(...)` |
+| Open planar experiment | `ChannelGridSpec(...)` or `ParallelogramGridSpec(...)` |
+| Regional extract from a global parent | `LimitedAreaGridSpec(...)` |
+| Cut an existing in-memory grid | `grid_generator.cutting.cut_grid(...)` |
 
 ## Installation
+
+Install from PyPI:
+
+```bash
+python -m pip install "icon-grid-generator[netcdf]"
+```
 
 From a local checkout:
 
@@ -61,30 +100,35 @@ bisections. ICON examples also commonly use zero-padded grid file names such as
 `R02B06`. This package accepts both compact names (`R2B6`) and zero-padded names
 (`R02B06`), then stores labels and metadata in the zero-padded form.
 
-## Quick Start
+## Resource Expectations
 
-Generate a global spherical grid:
+Global grid size grows by a factor of four with each bisection:
+
+| Grid | Cells | Edges | Vertices |
+| --- | ---: | ---: | ---: |
+| `R1B0` | 20 | 30 | 12 |
+| `R1B1` | 80 | 120 | 42 |
+| `R2B3` | 5,120 | 7,680 | 2,562 |
+| `R2B4` | 20,480 | 30,720 | 10,242 |
+| `R2B6` | 327,680 | 491,520 | 163,842 |
+
+`generate_grid()` has a default safety limit of 2,000,000 cells. Set
+`max_cells=None` only when the allocation is intentional.
+
+## Common Recipes
+
+Disable the default safety limit when a large allocation is intentional:
 
 ```python
 from grid_generator import generate_grid
 
-grid = generate_grid("R2B3")
-print(grid.name)
-print(grid.dims)
+grid = generate_grid("R2B4", max_cells=None)
 ```
 
-Example output:
-
-```text
-R02B03
-{'cell': 5120, 'vertex': 2562, 'edge': 7680}
-```
-
-Generate a spring-relaxed global grid:
+Generate a raw diagnostic grid without global optimization:
 
 ```python
-grid = generate_grid("R2B3", options={"max_cells": None, "spring_iterations": 2_000})
-print(grid.metadata["global_optimization"])
+raw_grid = generate_grid("R2B4", optimize_global=False)
 ```
 
 Generate a planar torus grid:
@@ -107,17 +151,37 @@ spec = LimitedAreaGridSpec(
     region=Region.lonlat_box(lon_min=-20.0, lon_max=20.0, lat_min=35.0, lat_max=60.0),
     boundary_depth=2,
 )
-grid = generate_grid(spec, options={"max_cells": None})
+grid = generate_grid(spec, max_cells=None)
 print(grid.dims)
 ```
 
-Write an ICON-style NetCDF file:
+Cut an existing grid with advanced region predicates:
 
 ```python
-grid.to_netcdf("grid.nc")
+from grid_generator import Region, generate_grid
+from grid_generator.cutting import CutGridSpec, cut_grid
+
+parent = generate_grid("R2B4")
+cut = cut_grid(
+    parent,
+    CutGridSpec(regions=Region.circle(lon=8.0, lat=47.0, radius_degrees=10.0)),
+)
 ```
 
-NetCDF export requires the `netcdf` optional extra.
+For the common single-region case, pass the region directly:
+
+```python
+from grid_generator import Region, generate_grid
+from grid_generator.cutting import cut_grid
+
+parent = generate_grid("R2B4")
+cut = cut_grid(parent, Region.circle(lon=8.0, lat=47.0, radius_degrees=10.0))
+```
+
+NetCDF export requires the `netcdf` optional extra. See
+[`examples/write_global_grid.py`](examples/write_global_grid.py),
+[`examples/write_limited_area.py`](examples/write_limited_area.py), and
+[`examples/planar_torus.py`](examples/planar_torus.py) for runnable scripts.
 
 ## Documentation
 
@@ -143,8 +207,7 @@ expectations, and domain-specific requirements for grid math and NetCDF changes.
 Run the checks used by CI:
 
 ```bash
-python -m ruff check .
-python -m pytest
+make check
 ```
 
 The package is laid out as a standalone Python project. If this directory is

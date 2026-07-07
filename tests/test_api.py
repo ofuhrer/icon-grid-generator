@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 
 import numpy as np
@@ -48,7 +49,6 @@ def test_public_package_exports_only_supported_grid_api():
         "ChannelGridSpec",
         "ParallelogramGridSpec",
         "LimitedAreaGridSpec",
-        "CutGridSpec",
         "Region",
     ]
     assert "write_icon_grid" not in grid_generator_package.__all__
@@ -64,6 +64,7 @@ def test_public_package_exports_only_supported_grid_api():
     assert not hasattr(grid_generator_package, "GlobalOptimizationOptions")
     assert not hasattr(grid_generator_package, "optimize_grid")
     assert not hasattr(grid_generator_package, "check_grid")
+    assert not hasattr(grid_generator_package, "CutGridSpec")
     assert grid_generator_package.IconGrid is IconGrid
     assert grid_generator_package.IconGridOptions is IconGridOptions
     assert grid_generator_package.GlobalGridSpec is GlobalGridSpec
@@ -278,6 +279,79 @@ def test_icon_grid_options_instance_produces_complete_grid():
     assert dataset.attrs["radius"] == 3.0
     assert dataset.sizes["cell"] == 80
     assert dataset.sizes["vertex"] == 42
+
+
+def test_generate_grid_accepts_keyword_option_overrides():
+    mapping_grid = generate_grid("R01B01", options={"sphere_radius": 2.0})
+    keyword_grid = generate_grid("R01B01", sphere_radius=2.0)
+    overridden_grid = generate_grid(
+        "R01B01",
+        options=IconGridOptions(max_cells=1, sphere_radius=2.0),
+        max_cells=None,
+        sphere_radius=3.0,
+    )
+
+    assert keyword_grid.options.sphere_radius == 2.0
+    assert np.array_equal(mapping_grid.cells, keyword_grid.cells)
+    assert overridden_grid.options.max_cells is None
+    assert overridden_grid.options.sphere_radius == 3.0
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        generate_grid("R01B00", not_an_option=True)
+
+
+@pytest.mark.parametrize(
+    "call_kwargs",
+    [
+        {"options": {"optimize_global": True}},
+        {"optimize_global": True},
+        {"options": IconGridOptions(optimize_global=True)},
+    ],
+)
+def test_planar_specs_reject_explicit_global_optimization(call_kwargs):
+    with pytest.raises(ValueError, match="only supported for global grids"):
+        generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=1.0), **call_kwargs)
+
+
+@pytest.mark.parametrize(
+    "call_kwargs",
+    [
+        {},
+        {"options": {"optimize_global": False}},
+        {"optimize_global": False},
+        {"options": IconGridOptions(optimize_global=False)},
+    ],
+)
+def test_planar_specs_accept_absent_or_disabled_global_optimization(call_kwargs):
+    grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=1.0), **call_kwargs)
+
+    assert grid.metadata["grid_geometry"] == 2
+    assert grid.options.optimize_global is False
+
+
+def test_generate_grid_signature_exposes_common_option_keywords():
+    signature = inspect.signature(generate_grid)
+
+    assert list(signature.parameters) == [
+        "spec",
+        "options",
+        "max_cells",
+        "accelerator",
+        "radius",
+        "sphere_radius",
+        "optimize_global",
+        "spring_beta",
+        "spring_iterations",
+        "fixed_boundary",
+        "north_pole_lon",
+        "north_pole_lat",
+        "rotation_angle_degrees",
+        "indexing",
+        "centre",
+        "subcentre",
+        "number_of_grid_used",
+    ]
+    for name in list(signature.parameters)[2:]:
+        assert signature.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_icon_grid_core_geometry_arrays_are_consistent():

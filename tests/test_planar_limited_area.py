@@ -5,14 +5,13 @@ import pytest
 
 from grid_generator import (
     ChannelGridSpec,
-    CutGridSpec,
     LimitedAreaGridSpec,
     ParallelogramGridSpec,
     Region,
     TorusGridSpec,
     generate_grid,
 )
-from grid_generator.cutting import cut_grid
+from grid_generator.cutting import CutGridSpec, cut_grid
 from grid_generator.planar import RaggedOrthogonalGridSpec, StretchedTorusGridSpec
 
 
@@ -110,6 +109,47 @@ def test_limited_area_grid_is_compact_boundary_ordered_and_parent_linked():
     assert np.all(np.isfinite(grid.geometry["edge_length"]))
 
 
+def test_limited_area_default_uses_optimized_global_parent():
+    spec = LimitedAreaGridSpec(
+        parent="R02B01",
+        region=Region.lonlat_box(
+            lon_min=-20.0,
+            lon_max=20.0,
+            lat_min=-20.0,
+            lat_max=20.0,
+        ),
+    )
+
+    grid = generate_grid(spec, spring_iterations=5)
+    parent = generate_grid("R02B01", spring_iterations=5)
+    parent_cells = grid.refinement["parent_cell_index"] - 1
+
+    assert grid.options.optimize_global is True
+    assert np.allclose(grid.cell_center_xyz, parent.cell_center_xyz[parent_cells])
+
+
+def test_limited_area_can_use_raw_or_explicitly_optimized_global_parent():
+    spec = LimitedAreaGridSpec(
+        parent="R02B01",
+        region=Region.lonlat_box(
+            lon_min=-20.0,
+            lon_max=20.0,
+            lat_min=-20.0,
+            lat_max=20.0,
+        ),
+    )
+
+    raw_grid = generate_grid(spec, optimize_global=False)
+    raw_parent = generate_grid("R02B01", optimize_global=False)
+    optimized_grid = generate_grid(spec, optimize_global=True, spring_iterations=5)
+
+    raw_parent_cells = raw_grid.refinement["parent_cell_index"] - 1
+    assert raw_grid.options.optimize_global is False
+    assert np.allclose(raw_grid.cell_center_xyz, raw_parent.cell_center_xyz[raw_parent_cells])
+    assert optimized_grid.options.optimize_global is True
+    assert optimized_grid.dims["cell"] > 0
+
+
 def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
     parent = generate_grid("R02B01", options={"max_cells": None})
     keep_spec = CutGridSpec(
@@ -149,6 +189,30 @@ def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
     assert np.any(cut.edge_cells[:, 1] < 0)
     assert np.all(cut.refinement["parent_cell_index"] > 0)
     assert np.all(cut.refinement["smooth_c_ctrl"] == 2)
+
+
+def test_cut_grid_accepts_region_directly_for_common_case():
+    parent = generate_grid("R02B01", max_cells=None)
+    cut = cut_grid(
+        parent,
+        Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0),
+        boundary_depth=1,
+        smoothing_depth=2,
+        name="CUT_DIRECT",
+    )
+
+    assert cut.name == "CUT_DIRECT"
+    assert cut.metadata["boundary_depth_index"] == 1
+    assert cut.metadata["smoothing_depth"] == 2
+    assert cut.dims["cell"] > 0
+    assert cut.dims["cell"] < parent.dims["cell"]
+
+    with pytest.raises(TypeError, match="CutGridSpec"):
+        cut_grid(
+            parent,
+            CutGridSpec(regions=Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0)),
+            boundary_depth=1,
+        )
 
 
 def test_cut_grid_boundary_expansion_ignores_open_grid_missing_neighbors():

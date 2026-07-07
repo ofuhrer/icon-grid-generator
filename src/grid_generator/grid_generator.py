@@ -67,6 +67,14 @@ FIXED_DIMS = {
     "edge_grf": 24,
     "vert_grf": 13,
 }
+class _UnsetOption:
+    def __repr__(self) -> str:
+        return "default"
+
+
+_OPTION_UNSET = _UnsetOption()
+
+
 ACTIVE_REFINEMENT_START = {
     "cell_grf": 9,
     "edge_grf": 14,
@@ -755,15 +763,58 @@ class IconGrid:
 def generate_grid(
     spec: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any,
     options: IconGridOptions | Mapping[str, Any] | None = None,
+    *,
+    max_cells: int | None | _UnsetOption = _OPTION_UNSET,
+    accelerator: str | _UnsetOption = _OPTION_UNSET,
+    radius: float | _UnsetOption = _OPTION_UNSET,
+    sphere_radius: float | _UnsetOption = _OPTION_UNSET,
+    optimize_global: bool | _UnsetOption = _OPTION_UNSET,
+    spring_beta: float | _UnsetOption = _OPTION_UNSET,
+    spring_iterations: int | _UnsetOption = _OPTION_UNSET,
+    fixed_boundary: bool | _UnsetOption = _OPTION_UNSET,
+    north_pole_lon: float | _UnsetOption = _OPTION_UNSET,
+    north_pole_lat: float | _UnsetOption = _OPTION_UNSET,
+    rotation_angle_degrees: float | _UnsetOption = _OPTION_UNSET,
+    indexing: str | _UnsetOption = _OPTION_UNSET,
+    centre: int | _UnsetOption = _OPTION_UNSET,
+    subcentre: int | _UnsetOption = _OPTION_UNSET,
+    number_of_grid_used: int | _UnsetOption = _OPTION_UNSET,
 ) -> IconGrid:
-    """Create a pure Python ICON geodesic, torus, or limited-area grid."""
+    """Create a global, planar, or limited-area ICON-style grid.
+
+    Most users pass a grid name such as ``"R2B4"`` and optional keyword
+    overrides:
+
+    ``generate_grid("R2B4", max_cells=None, sphere_radius=6_371_229.0)``
+
+    Reuse ``IconGridOptions`` or an options mapping when the same configuration
+    should be shared across multiple calls. Global spherical grids are optimized
+    by default; pass ``optimize_global=False`` only for raw topology diagnostics.
+    """
     grid_spec = parse_grid_spec(spec) if isinstance(spec, str) else spec
     if not isinstance(grid_spec, _SUPPORTED_GRID_SPEC_TYPES):
         raise TypeError("spec must be an ICON R<n>B<k> string or a supported grid spec")
-    resolved_options = _resolve_options(options)
-    explicit_optimize_global = isinstance(options, Mapping) and "optimize_global" in options
+    option_overrides = _option_overrides_from_kwargs(
+        max_cells=max_cells,
+        accelerator=accelerator,
+        radius=radius,
+        sphere_radius=sphere_radius,
+        optimize_global=optimize_global,
+        spring_beta=spring_beta,
+        spring_iterations=spring_iterations,
+        fixed_boundary=fixed_boundary,
+        north_pole_lon=north_pole_lon,
+        north_pole_lat=north_pole_lat,
+        rotation_angle_degrees=rotation_angle_degrees,
+        indexing=indexing,
+        centre=centre,
+        subcentre=subcentre,
+        number_of_grid_used=number_of_grid_used,
+    )
+    resolved_options = _resolve_options(options, option_overrides)
+    explicit_optimize_global = _optimize_global_was_explicit(options, option_overrides)
     if (
-        not isinstance(grid_spec, GlobalGridSpec)
+        isinstance(grid_spec, (TorusGridSpec, *_PLANAR_GRID_SPEC_TYPES))
         and resolved_options.global_optimization.method == "spring"
         and not explicit_optimize_global
     ):
@@ -818,9 +869,6 @@ def _validate_planar_counts(name: str, nx: Any, ny: Any, *, minimum: int = 1) ->
         raise ValueError(f"{name} ny must be an integer greater than or equal to {minimum}")
 
 
-
-
-
 def parse_grid_spec(
     grid_name: str | GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any,
 ) -> GlobalGridSpec | TorusGridSpec | LimitedAreaGridSpec | Any:
@@ -847,20 +895,49 @@ def parse_grid_spec(
     )
 
 
-def _resolve_options(options: IconGridOptions | Mapping[str, Any] | None) -> IconGridOptions:
+def _resolve_options(
+    options: IconGridOptions | Mapping[str, Any] | None,
+    overrides: Mapping[str, Any] | None = None,
+) -> IconGridOptions:
+    overrides = {} if overrides is None else dict(overrides)
+    allowed = set(IconGridOptions.__dataclass_fields__)
+    unknown = set(overrides) - allowed
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise TypeError(f"unknown grid option(s): {names}")
     if options is None:
-        return IconGridOptions()
+        return IconGridOptions(**overrides)
     if isinstance(options, IconGridOptions):
-        return options
+        if not overrides:
+            return options
+        return replace(options, **overrides)
     if not isinstance(options, Mapping):
         raise TypeError("options must be None, an IconGridOptions instance, or a mapping")
 
-    allowed = set(IconGridOptions.__dataclass_fields__)
     unknown = set(options) - allowed
     if unknown:
         names = ", ".join(sorted(unknown))
         raise TypeError(f"unknown grid option(s): {names}")
-    return IconGridOptions(**dict(options))
+    values = dict(options)
+    values.update(overrides)
+    return IconGridOptions(**values)
+
+
+def _option_overrides_from_kwargs(**kwargs: Any) -> dict[str, Any]:
+    return {name: value for name, value in kwargs.items() if value is not _OPTION_UNSET}
+
+
+def _optimize_global_was_explicit(
+    options: IconGridOptions | Mapping[str, Any] | None,
+    overrides: Mapping[str, Any],
+) -> bool:
+    if "optimize_global" in overrides:
+        return True
+    if isinstance(options, Mapping):
+        return "optimize_global" in options
+    if isinstance(options, IconGridOptions):
+        return options.optimize_global
+    return False
 
 
 
@@ -989,15 +1066,43 @@ def _generate_limited_area_grid(spec: LimitedAreaGridSpec, options: IconGridOpti
     )
 
 
-def cut_grid(grid: Any, spec: CutGridSpec) -> IconGrid:
-    """Extract an open cut grid from an existing in-memory grid."""
+def cut_grid(
+    grid: Any,
+    spec: CutGridSpec | Any,
+    *,
+    mode: str = "keep",
+    boundary_depth: int = 0,
+    smoothing_depth: int = 0,
+    name: str = "",
+) -> IconGrid:
+    """Extract an open cut grid from an existing in-memory grid.
+
+    Pass a ``CutGridSpec`` for full control, or pass a ``Region`` object
+    directly for the common case:
+
+    ``cut_grid(grid, Region.circle(lon=8.0, lat=47.0, radius_degrees=10.0))``
+    """
     from ._limited_area import cut_existing_grid
+
+    if isinstance(spec, CutGridSpec):
+        if mode != "keep" or boundary_depth != 0 or smoothing_depth != 0 or name:
+            raise TypeError("cut options cannot be passed when spec is a CutGridSpec")
+    else:
+        spec = CutGridSpec(
+            regions=spec,
+            mode=mode,
+            boundary_depth=boundary_depth,
+            smoothing_depth=smoothing_depth,
+            name=name,
+        )
 
     geometry, topology, metrics, refinement = cut_existing_grid(grid, spec)
     metadata = _metadata(spec, grid.options, metrics.fields)
     metadata.update(
         {
             "source_grid_name": grid.name,
+            "source_grid_geometry": grid.metadata.get("grid_geometry"),
+            "source_grid_mapping_name": grid.metadata.get("grid_mapping_name"),
             "boundary_depth_index": spec.boundary_depth,
             "smoothing_depth": spec.smoothing_depth,
             "cut_mode": spec.mode,

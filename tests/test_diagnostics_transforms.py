@@ -5,7 +5,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from grid_generator import ChannelGridSpec, TorusGridSpec, generate_grid
+from grid_generator import ChannelGridSpec, Region, TorusGridSpec, generate_grid
+from grid_generator.cutting import cut_grid
 from grid_generator.diagnostics import (
     cell_divergence,
     cell_vorticity_fnorm,
@@ -35,6 +36,41 @@ def test_geometry_optimization_and_diffusion_preserve_topology_and_boundaries():
         assert np.allclose(transformed.vertices[boundary_vertices], grid.vertices[boundary_vertices])
         assert np.all(np.isfinite(transformed.geometry["cell_area"]))
         assert np.all(transformed.geometry["cell_area"] > 0.0)
+
+
+def test_transforms_keep_planar_cut_grids_planar():
+    parent = generate_grid(ChannelGridSpec(nx=4, ny=3, edge_length=1.0))
+    cut = cut_grid(
+        parent,
+        Region.lonlat_box(lon_min=-180.0, lon_max=0.0, lat_min=-90.0, lat_max=90.0),
+    )
+
+    optimized = optimize_grid(cut, OptimizationOptions(iterations=1, fixed_boundary=False))
+    diffused = diffuse_grid(cut, DiffusionOptions(iterations=1, fixed_boundary=False))
+
+    assert cut.metadata["grid_geometry"] == 3
+    assert cut.metadata["source_grid_geometry"] == 2
+    for transformed in (optimized, diffused):
+        assert transformed.metadata["grid_geometry"] == 3
+        assert transformed.metadata["source_grid_geometry"] == 2
+        assert np.array_equal(transformed.cells, cut.cells)
+        assert np.array_equal(transformed.edges, cut.edges)
+        assert np.allclose(transformed.vertices[:, 2], cut.vertices[:, 2])
+        assert np.max(np.linalg.norm(transformed.vertices[:, :2], axis=1)) > parent.options.radius
+        assert np.all(transformed.geometry["cell_area"] > 0.0)
+
+
+def test_transforms_keep_spherical_cut_grids_spherical():
+    parent = generate_grid("R01B01", optimize_global=False)
+    cut = cut_grid(parent, Region.circle(lon=0.0, lat=0.0, radius_degrees=60.0))
+
+    optimized = optimize_grid(cut, OptimizationOptions(iterations=1, fixed_boundary=False))
+
+    assert cut.metadata["source_grid_geometry"] == 1
+    assert optimized.metadata["source_grid_geometry"] == 1
+    assert np.array_equal(optimized.cells, cut.cells)
+    assert np.array_equal(optimized.edges, cut.edges)
+    assert np.allclose(np.linalg.norm(optimized.vertices, axis=1), parent.options.radius)
 
 
 def test_geometry_postprocessing_rejects_invalid_option_objects():
