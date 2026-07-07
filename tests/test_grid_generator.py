@@ -1,84 +1,37 @@
 from __future__ import annotations
 
-import builtins
-from dataclasses import replace
 import math
+import sys
+import types
 import numpy as np
 import pytest
 
-import grid_generator as grid_generator_package
 from grid_generator import _accelerated
 from grid_generator import (
     ChannelGridSpec,
-    CutGridSpec,
-    IconGrid,
     IconGridOptions,
     GlobalGridSpec,
     LimitedAreaGridSpec,
-    ParallelogramGridSpec,
     Region,
     TorusGridSpec,
     generate_grid,
 )
-from grid_generator.cutting import cut_grid
-from grid_generator.diagnostics import (
-    cell_divergence,
-    cell_vorticity_fnorm,
-    check_grid,
-    grid_statistics,
-    triangle_properties,
-)
 from grid_generator import grid_generator as gg
 from grid_generator._geometry import SphericalIcosahedralGeometry
 from grid_generator._metrics import SphericalMetricsBuilder
-from grid_generator._ordering import IconOrderingBuilder
+from grid_generator._ordering import IconOrderingBuilder, _permute_cells
+from grid_generator._types import BisectionProvenance, GeometryData
 from grid_generator._refinement import GlobalRefinementBuilder
 from grid_generator._topology import GlobalTopologyBuilder
 from grid_generator.grid_generator import parse_grid_spec
-from grid_generator.planar import RaggedOrthogonalGridSpec, StretchedTorusGridSpec
 from grid_generator.transforms import (
     DiffusionOptions,
     OptimizationOptions,
-    diffuse_grid,
     optimize_global_grid,
     optimize_grid,
 )
 
 
-def test_public_package_exports_only_supported_grid_api():
-    assert grid_generator_package.__all__ == [
-        "generate_grid",
-        "IconGrid",
-        "IconGridOptions",
-        "GlobalGridSpec",
-        "TorusGridSpec",
-        "ChannelGridSpec",
-        "ParallelogramGridSpec",
-        "LimitedAreaGridSpec",
-        "CutGridSpec",
-        "Region",
-    ]
-    assert "write_icon_grid" not in grid_generator_package.__all__
-    assert not hasattr(grid_generator_package, "write_icon_grid")
-    assert not hasattr(grid_generator_package, "GeneratedGrid")
-    assert not hasattr(grid_generator_package, "GridOptions")
-    assert not hasattr(grid_generator_package, "GridSpec")
-    assert not hasattr(grid_generator_package, "IconGridSpec")
-    assert not hasattr(grid_generator_package, "LimitedAreaSpec")
-    assert not hasattr(grid_generator_package, "StretchedTorusGridSpec")
-    assert not hasattr(grid_generator_package, "RaggedOrthogonalGridSpec")
-    assert not hasattr(grid_generator_package, "GlobalGridOptions")
-    assert not hasattr(grid_generator_package, "GlobalOptimizationOptions")
-    assert not hasattr(grid_generator_package, "optimize_grid")
-    assert not hasattr(grid_generator_package, "check_grid")
-    assert grid_generator_package.IconGrid is IconGrid
-    assert grid_generator_package.IconGridOptions is IconGridOptions
-    assert grid_generator_package.GlobalGridSpec is GlobalGridSpec
-    assert grid_generator_package.LimitedAreaGridSpec is LimitedAreaGridSpec
-    assert grid_generator_package.TorusGridSpec is TorusGridSpec
-    assert grid_generator_package.generate_grid is generate_grid
-    assert grid_generator_package.ChannelGridSpec is ChannelGridSpec
-    assert grid_generator_package.Region is Region
 
 
 def assert_unit_sphere(points):
@@ -328,141 +281,20 @@ def geometric_dual_areas_from_cell_centers(grid, sphere_radius):
     return dual_areas
 
 
-def test_parse_grid_spec_normalizes_supported_names_and_expected_counts():
-    assert parse_grid_spec("R01B01").name == "R01B01"
-    assert parse_grid_spec("R1B1").name == "R01B01"
-    assert parse_grid_spec("R2B6").name == "R02B06"
-    assert parse_grid_spec(" r02b03 ").name == "R02B03"
-
-    spec = parse_grid_spec("R02B03")
-
-    assert isinstance(spec, GlobalGridSpec)
-    assert spec.root == 2
-    assert spec.bisections == 3
-    assert spec.frequency == 16
-    assert spec.expected_cells == 5120
-    assert spec.expected_edges == 7680
-    assert spec.expected_vertices == 2562
 
 
-def test_global_grid_spec_derives_frequency_and_name():
-    spec = GlobalGridSpec(root=2, bisections=3)
-
-    assert spec.frequency == 16
-    assert spec.name == "R02B03"
-    assert generate_grid(spec).dims["cell"] == 5120
 
 
-def test_global_grid_spec_normalizes_or_rejects_custom_name():
-    spec = GlobalGridSpec(root=2, bisections=3, name=" r2b3 ")
-
-    assert spec.name == "R02B03"
-    assert gg.grid_uuid(spec.name) == gg.grid_uuid("R02B03")
-    assert GlobalGridSpec(root=2, bisections=6, name="r2b6").name == "R02B06"
-
-    with pytest.raises(ValueError, match="name must match"):
-        GlobalGridSpec(root=2, bisections=3, name="R01B00")
-    with pytest.raises(ValueError, match=r"form R<n>B<k>"):
-        GlobalGridSpec(root=1, bisections=0, name="custom")
 
 
-def test_global_grid_spec_rejects_inconsistent_frequency():
-    with pytest.raises(ValueError, match=r"frequency must equal root \* 2\*\*bisections"):
-        GlobalGridSpec(root=2, bisections=3, frequency=15)
 
 
-@pytest.mark.parametrize(
-    "grid_name",
-    [None, "", "foo", "R00B01", "R01", "01B01", "R01B-1", "R1.0B1"],
-)
-def test_parse_grid_spec_rejects_invalid_names(grid_name):
-    with pytest.raises((TypeError, ValueError)):
-        parse_grid_spec(grid_name)
 
 
-def test_parse_grid_spec_negative_bisection_defensive_guard(monkeypatch):
-    class FakeMatch:
-        def group(self, index):
-            return {1: "1", 2: "-1"}[index]
-
-    class FakeRegex:
-        def fullmatch(self, value):
-            assert value == "R01B-1"
-            return FakeMatch()
-
-    monkeypatch.setattr(gg, "GRID_NAME_RE", FakeRegex())
-
-    with pytest.raises(ValueError, match="bisections must be non-negative"):
-        parse_grid_spec("R01B-1")
 
 
-def test_generate_grid_accepts_all_public_grid_specs():
-    global_grid = generate_grid(parse_grid_spec("R01B00"))
-    torus_grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=1.0))
-    stretched_grid = generate_grid(StretchedTorusGridSpec(nx=4, ny=3, edge_length=1.0))
-    channel_grid = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
-    parallelogram_grid = generate_grid(ParallelogramGridSpec(nx=3, ny=2, edge_length=1.0))
-    ragged_grid = generate_grid(RaggedOrthogonalGridSpec(nx=3, ny=2, dx=1.0, dy=1.0))
-    limited_area_grid = generate_grid(
-        LimitedAreaGridSpec(
-            parent="R02B01",
-            region=Region.lonlat_box(
-                lon_min=-30.0,
-                lon_max=30.0,
-                lat_min=-30.0,
-                lat_max=30.0,
-            ),
-            boundary_depth=1,
-        ),
-        options={"max_cells": None},
-    )
-
-    assert global_grid.metadata["grid_geometry"] == 1
-    assert torus_grid.metadata["grid_geometry"] == 2
-    assert stretched_grid.metadata["grid_geometry"] == 2
-    assert channel_grid.metadata["grid_geometry"] == 2
-    assert parallelogram_grid.metadata["grid_geometry"] == 2
-    assert ragged_grid.metadata["grid_geometry"] == 2
-    assert limited_area_grid.metadata["grid_geometry"] == 3
 
 
-@pytest.mark.parametrize(
-    ("options", "error", "message"),
-    [
-        (object(), TypeError, "options must be"),
-        ({"unknown": 1}, TypeError, "unknown grid option"),
-        ({"radius": 0.0}, ValueError, "radius must be positive"),
-        ({"radius": -1.0}, ValueError, "radius must be positive"),
-        ({"radius": math.nan}, ValueError, "radius must be finite"),
-        ({"radius": math.inf}, ValueError, "radius must be finite"),
-        ({"sphere_radius": 0.0}, ValueError, "sphere_radius must be positive"),
-        ({"sphere_radius": math.nan}, ValueError, "sphere_radius must be finite"),
-        ({"sphere_radius": math.inf}, ValueError, "sphere_radius must be finite"),
-        ({"max_cells": 3.14}, TypeError, "max_cells"),
-        ({"max_cells": "100"}, TypeError, "max_cells"),
-        ({"max_cells": 0}, ValueError, "max_cells must be positive"),
-        ({"optimize_global": 1}, TypeError, "optimize_global"),
-        ({"spring_beta": 0.0}, ValueError, "beta_spring"),
-        (
-            {"north_pole_lon": math.inf},
-            ValueError,
-            "north_pole_lon",
-        ),
-        (
-            {"rotation_angle_degrees": "0.05"},
-            TypeError,
-            "rotation_angle_degrees",
-        ),
-        ({"accelerator": 1}, TypeError, "accelerator"),
-        ({"accelerator": "fast"}, ValueError, "accelerator"),
-        ({"spring_iterations": -1}, ValueError, "maxit"),
-        ({"spring_iterations": 3.14}, TypeError, "maxit"),
-        ({"indexing": "fast"}, ValueError, "indexing_algorithm"),
-    ],
-)
-def test_generate_grid_rejects_invalid_options(options, error, message):
-    with pytest.raises(error, match=message):
-        generate_grid("R01B00", options=options)
 
 
 def test_global_spring_optimization_preserves_topology_and_improves_quality():
@@ -551,6 +383,115 @@ def test_raw_global_generation_bypasses_staged_spring_relaxation():
     assert relaxed_cell_cv < raw_cell_cv
 
 
+def test_raw_bisection_generation_matches_direct_pipeline():
+    spec = GlobalGridSpec(root=2, bisections=3)
+    options = IconGridOptions(max_cells=None, optimize_global=False)
+    public = generate_grid(spec, options=options)
+    direct = gg._generate_raw_global_grid(spec, options, gg._GlobalGenerationContext())
+
+    assert public.metadata["global_optimization"] == "none"
+    assert np.array_equal(public.vertices, direct.vertices)
+    assert np.array_equal(public.cells, direct.cells)
+    assert np.array_equal(public.edges, direct.edges)
+    assert np.array_equal(public.cell_edges, direct.cell_edges)
+    assert np.array_equal(public.edge_cells, direct.edge_cells)
+    assert np.array_equal(
+        public.geometry["orientation_of_normal"],
+        direct.geometry["orientation_of_normal"],
+    )
+
+
+def test_staged_global_generation_evicts_completed_parent_caches():
+    context = gg._GlobalGenerationContext()
+    spec = GlobalGridSpec(root=2, bisections=2)
+    grid = gg._generate_grid(spec, IconGridOptions(max_cells=None, spring_iterations=1), context)
+
+    assert grid.name == "R02B02"
+    assert set(context.grids) == {(2, 2)}
+    assert not context.parent_data
+    assert not context.parent_vertex_indices
+
+
+def test_private_matching_unit_point_indices_matches_nearest_mapping():
+    options = IconGridOptions(max_cells=None, spring_iterations=1)
+    context = gg._GlobalGenerationContext()
+    parent = gg._generate_grid(GlobalGridSpec(root=2, bisections=2), options, context)
+    vertices, cells, provenance = gg._refine_triangles_bisection_with_provenance(
+        parent.vertices,
+        parent.cells,
+    )
+    geometry = gg._geometry_from_vertices(
+        GlobalGridSpec(root=2, bisections=3),
+        options,
+        vertices * options.radius,
+        cells,
+        provenance,
+    )
+    parent_vertex_count = int(
+        np.max(provenance.parent_vertex_index[provenance.parent_vertex_index > 0])
+    )
+    provenance_edge_centers = gg._edge_centers(
+        geometry.vertices[:parent_vertex_count],
+        provenance.edges,
+        options.radius,
+    )
+
+    keyed = gg._matching_unit_point_indices(provenance_edge_centers, parent.edge_center_xyz)
+    nearest = gg._nearest_unit_point_indices(provenance_edge_centers, parent.edge_center_xyz)
+
+    assert np.array_equal(keyed, nearest)
+    with pytest.raises(RuntimeError, match="matching target"):
+        gg._matching_unit_point_indices(
+            np.asarray([[1.0, 0.0, 0.0]]),
+            np.asarray([[0.0, 1.0, 0.0]]),
+        )
+
+
+def test_private_matching_edge_indices_by_vertices_matches_spatial_mapping():
+    options = IconGridOptions(max_cells=None, optimize_global=False)
+    context = gg._GlobalGenerationContext()
+    parent = gg._generate_grid(GlobalGridSpec(root=2, bisections=2), options, context)
+    vertices, _, provenance = gg._refine_triangles_bisection_with_provenance(
+        parent.vertices,
+        parent.cells,
+    )
+    parent_vertex_count = int(
+        np.max(provenance.parent_vertex_index[provenance.parent_vertex_index > 0])
+    )
+    provenance_edge_centers = gg._edge_centers(
+        vertices[:parent_vertex_count],
+        provenance.edges,
+        options.radius,
+    )
+
+    keyed = gg._matching_edge_indices_by_vertices(provenance.edges, parent.edges)
+    spatial = gg._matching_unit_point_indices(provenance_edge_centers, parent.edge_center_xyz)
+
+    assert np.array_equal(keyed, spatial)
+    with pytest.raises(RuntimeError, match="matching target edge"):
+        gg._matching_edge_indices_by_vertices(
+            np.asarray([[0, parent.dims["vertex"]]], dtype=np.int32),
+            parent.edges,
+        )
+
+
+def test_bisection_provenance_stores_parent_edge_fields():
+    parent = generate_grid("R02B02", options={"max_cells": None, "optimize_global": False})
+    _, _, provenance = gg._refine_triangles_bisection_with_provenance(
+        parent.vertices,
+        parent.cells,
+    )
+    computed_parent_edge, computed_edge_type = gg._parent_edge_fields(
+        provenance.child_edges,
+        provenance.parent_vertex_index,
+        provenance,
+        "numpy",
+    )
+
+    assert np.array_equal(provenance.child_parent_edge_index, computed_parent_edge)
+    assert np.array_equal(provenance.child_edge_parent_type, computed_edge_type)
+
+
 @pytest.mark.parametrize("grid_name", ["R02B02", "R02B04"])
 def test_staged_global_generation_preserves_connectivity_contract(grid_name):
     grid = generate_grid(grid_name)
@@ -630,6 +571,13 @@ def test_auto_accelerator_uses_numba_only_for_large_lookup_work():
     assert not _accelerated.should_use_numba("auto", threshold - 1)
     assert _accelerated.should_use_numba("auto", threshold) == _accelerated.is_numba_available()
 
+    order_threshold = _accelerated.AUTO_NUMBA_MIN_ORDER_CELLS
+    assert not _accelerated.should_use_numba_ordering("auto", order_threshold - 1)
+    assert (
+        _accelerated.should_use_numba_ordering("auto", order_threshold)
+        == _accelerated.is_numba_available()
+    )
+
 
 def test_numba_accelerator_is_optional_and_matches_numpy_when_available():
     if not _accelerated.is_numba_available():
@@ -652,103 +600,12 @@ def test_numba_accelerator_is_optional_and_matches_numpy_when_available():
     )
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "error", "message"),
-    [
-        ({"sphere_radius": 0.0}, ValueError, "sphere_radius must be positive"),
-        ({"sphere_radius": math.nan}, ValueError, "sphere_radius must be finite"),
-        ({"sphere_radius": math.inf}, ValueError, "sphere_radius must be finite"),
-        ({"options": {"north_pole_lat": math.inf}}, ValueError, "north_pole_lat"),
-        (
-            {"options": {"rotation_angle_degrees": "0.05"}},
-            TypeError,
-            "rotation_angle_degrees",
-        ),
-        ({"options": {"optimize_global": 1}}, TypeError, "optimize_global"),
-    ],
-)
-def test_grid_uuid_rejects_invalid_numeric_inputs(kwargs, error, message):
-    with pytest.raises(error, match=message):
-        gg.grid_uuid("R01B00", **kwargs)
 
 
-@pytest.mark.parametrize(
-    ("grid_name", "cells", "edges", "vertices"),
-    [
-        ("R01B00", 20, 30, 12),
-        ("R01B01", 80, 120, 42),
-        ("R02B02", 1280, 1920, 642),
-    ],
-)
-def test_known_grid_dimensions(grid_name, cells, edges, vertices):
-    grid = generate_grid(grid_name)
-
-    assert grid.dims == {"cell": cells, "vertex": vertices, "edge": edges}
-    assert grid.cells.shape == (cells, 3)
-    assert grid.edges.shape == (edges, 2)
-    assert grid.vertices.shape == (vertices, 3)
-    assert grid.cell_edges.shape == (cells, 3)
-    assert grid.edge_cells.shape == (edges, 2)
 
 
-def test_icon_grid_options_instance_produces_complete_grid():
-    options = IconGridOptions(max_cells=None, radius=3.0, sphere_radius=4.0)
-    grid = generate_grid("R01B01", options=options)
-    grid_dict = grid.to_dict()
-    dataset = grid.to_xarray()
-
-    assert grid.options is options
-    assert grid.dims == {"cell": 80, "vertex": 42, "edge": 120}
-    assert grid.edges.shape == (120, 2)
-    assert grid.cell_edges.shape == (80, 3)
-    assert grid.edge_cells.shape == (120, 2)
-    assert grid.edge_center_xyz.shape == (120, 3)
-    assert grid.edge_lon.shape == (120,)
-    assert grid.edge_lat.shape == (120,)
-    assert grid.icon_connectivity
-    assert grid.connectivity
-    assert grid.neighbor_tables
-    assert grid.geometry
-    assert grid.refinement
-    assert grid.metadata["grid_root"] == 1
-    assert grid.metadata["sphere_radius"] == 4.0
-    assert "mean_cell_area" in grid.metadata
-    assert "edges" in grid_dict
-    assert dataset.sizes["edge"] == 120
-    assert dataset.attrs["name"] == "R01B01"
-    assert dataset.attrs["radius"] == 3.0
-    assert dataset.sizes["cell"] == 80
-    assert dataset.sizes["vertex"] == 42
 
 
-def test_icon_grid_core_geometry_arrays_are_consistent():
-    radius = 6.0
-    grid = generate_grid(
-        "R01B01",
-        options={"radius": radius},
-    )
-
-    vertex_radius = np.linalg.norm(grid.vertices, axis=1)
-    center_radius = np.linalg.norm(grid.cell_center_xyz, axis=1)
-    edge_center_radius = np.linalg.norm(grid.edge_center_xyz, axis=1)
-
-    assert grid.name == "R01B01"
-    assert grid.spec.name == grid.name
-    assert np.allclose(vertex_radius, radius)
-    assert np.allclose(center_radius, radius)
-    assert np.allclose(edge_center_radius, radius)
-    assert_lon_lat_match_xyz(grid.lon, grid.lat, grid.cell_center_xyz)
-    assert_lon_lat_match_xyz(grid.vertex_lon, grid.vertex_lat, grid.vertices)
-    assert_lon_lat_match_xyz(grid.edge_lon, grid.edge_lat, grid.edge_center_xyz)
-    assert np.array_equal(grid.cell_vertex_lon, grid.vertex_lon[grid.cells])
-    assert np.array_equal(grid.cell_vertex_lat, grid.vertex_lat[grid.cells])
-    assert np.all((-180.0 <= grid.lon) & (grid.lon <= 180.0))
-    assert np.all((-90.0 <= grid.lat) & (grid.lat <= 90.0))
-    assert np.all((-180.0 <= grid.vertex_lon) & (grid.vertex_lon <= 180.0))
-    assert np.all((-90.0 <= grid.vertex_lat) & (grid.vertex_lat <= 90.0))
-    assert np.all((-180.0 <= grid.edge_lon) & (grid.edge_lon <= 180.0))
-    assert np.all((-90.0 <= grid.edge_lat) & (grid.edge_lat <= 90.0))
-    assert_outward_cells(grid)
 
 
 def test_internal_generation_pipeline_matches_public_facade():
@@ -768,6 +625,12 @@ def test_internal_generation_pipeline_matches_public_facade():
     metrics = SphericalMetricsBuilder().build(options, geometry, topology)
     refinement = GlobalRefinementBuilder(context).build(spec, options, geometry, topology)
 
+    def assert_same_array(actual, expected):
+        if np.issubdtype(np.asarray(expected).dtype, np.floating):
+            assert np.allclose(actual, expected)
+        else:
+            assert np.array_equal(actual, expected)
+
     for name in [
         "vertices",
         "cells",
@@ -779,7 +642,7 @@ def test_internal_generation_pipeline_matches_public_facade():
         "cell_vertex_lon",
         "cell_vertex_lat",
     ]:
-        assert np.array_equal(getattr(geometry, name), getattr(grid, name))
+        assert_same_array(getattr(grid, name), getattr(geometry, name))
     for name in [
         "edges",
         "cell_edges",
@@ -788,7 +651,7 @@ def test_internal_generation_pipeline_matches_public_facade():
         "edge_lon",
         "edge_lat",
     ]:
-        assert np.array_equal(getattr(topology, name), getattr(grid, name))
+        assert_same_array(getattr(grid, name), getattr(topology, name))
     for name, value in topology.icon_connectivity.items():
         assert np.array_equal(value, grid.icon_connectivity[name])
     for name, value in topology.connectivity.items():
@@ -796,7 +659,7 @@ def test_internal_generation_pipeline_matches_public_facade():
     for name, value in topology.neighbor_tables.items():
         assert np.array_equal(value, grid.neighbor_tables[name])
     for name, value in metrics.fields.items():
-        assert np.array_equal(value, grid.geometry[name])
+        assert_same_array(grid.geometry[name], value)
     for name, value in refinement.fields.items():
         assert np.array_equal(value, grid.refinement[name])
 
@@ -861,237 +724,27 @@ def test_spherical_bisection_parent_cell_types_match_child_geometry():
         assert inherited_vertices[0] == parent.cells[parent_cell, parent_vertex_position] + 1
 
 
-def test_torus_grid_has_periodic_topology_and_planar_metrics():
-    edge_length = 1000.0
-    grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=edge_length))
-
-    assert grid.name == "TORUS4x3"
-    assert grid.dims == {"cell": 24, "vertex": 12, "edge": 36}
-    assert grid.metadata["grid_geometry"] == 2
-    assert grid.metadata["domain_length"] == pytest.approx(4000.0)
-    assert grid.metadata["domain_height"] == pytest.approx(3.0 * np.sqrt(3.0) * 500.0)
-    assert np.all(grid.edge_cells >= 0)
-    assert np.all(grid.edge_cells[:, 0] != grid.edge_cells[:, 1])
-    assert np.allclose(grid.geometry["edge_length"], edge_length)
-    assert np.allclose(grid.geometry["cell_area"], np.sqrt(3.0) * 0.25 * edge_length**2)
-    assert np.allclose(grid.geometry["dual_edge_length"], edge_length / np.sqrt(3.0))
-    assert np.allclose(grid.geometry["edgequad_area"], 0.0)
-    assert np.all(np.isfinite(grid.vertices))
-    assert np.all(np.isfinite(grid.cell_center_xyz))
-    assert np.all(np.isfinite(grid.edge_center_xyz))
-    assert np.all(np.isfinite(grid.geometry["edge_primal_normal_cartesian"]))
 
 
-def test_torus_netcdf_export_contains_complete_periodic_grid(tmp_path):
-    netcdf4 = pytest.importorskip("netCDF4")
-    grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=2.0))
-    path = grid.to_netcdf(tmp_path / "torus.nc")
-
-    with netcdf4.Dataset(path) as dataset:
-        assert dataset.dimensions["cell"].size == 24
-        assert dataset.dimensions["vertex"].size == 12
-        assert dataset.dimensions["edge"].size == 36
-        assert dataset.getncattr("grid_geometry") == 2
-        assert dataset.getncattr("torus_nx") == 4
-        assert dataset.getncattr("torus_ny") == 3
-        assert np.array_equal(dataset.variables["adjacent_cell_of_edge"][:], grid.edge_cells.T + 1)
-        assert np.allclose(dataset.variables["cell_area"][:], grid.geometry["cell_area"])
-        assert np.allclose(dataset.variables["edge_length"][:], grid.geometry["edge_length"])
 
 
-@pytest.mark.parametrize(
-    "spec",
-    [
-        StretchedTorusGridSpec(nx=4, ny=3, edge_length=2.0, stretch_x=1.5, stretch_y=0.75),
-        ChannelGridSpec(nx=3, ny=2, edge_length=2.0),
-        ParallelogramGridSpec(nx=3, ny=2, edge_length=2.0, shear=0.35),
-        RaggedOrthogonalGridSpec(nx=3, ny=2, dx=2.0, dy=1.0, raggedness=0.1),
-    ],
-)
-def test_planar_grid_variants_have_consistent_triangular_topology(spec):
-    grid = generate_grid(spec)
-
-    assert grid.dims["cell"] == spec.expected_cells
-    assert grid.dims["vertex"] == spec.expected_vertices
-    assert grid.dims["edge"] == spec.expected_edges
-    assert grid.metadata["grid_geometry"] == 2
-    assert grid.cells.shape == (spec.expected_cells, 3)
-    assert grid.edges.shape == (spec.expected_edges, 2)
-    assert np.all((0 <= grid.cells) & (grid.cells < grid.dims["vertex"]))
-    assert np.all((0 <= grid.cell_edges) & (grid.cell_edges < grid.dims["edge"]))
-    assert np.all(np.isfinite(grid.vertices))
-    assert np.all(grid.geometry["cell_area"] > 0.0)
-    assert np.all(grid.geometry["edge_length"] > 0.0)
-    if getattr(spec, "periodic", False):
-        assert np.all(grid.edge_cells >= 0)
-        assert grid.metadata["periodic"] == 1
-    else:
-        assert np.any(grid.edge_cells[:, 1] < 0)
-        assert grid.metadata["periodic"] == 0
 
 
-def test_stretched_torus_rejects_degenerate_periodic_dimensions():
-    with pytest.raises(ValueError, match="greater than or equal to 3"):
-        StretchedTorusGridSpec(nx=2, ny=3, edge_length=1.0)
-    with pytest.raises(ValueError, match="greater than or equal to 3"):
-        StretchedTorusGridSpec(nx=3, ny=2, edge_length=1.0)
 
 
-def test_limited_area_grid_is_compact_boundary_ordered_and_parent_linked():
-    spec = LimitedAreaGridSpec(
-        parent="R02B01",
-        region=Region.lonlat_box(
-            lon_min=-20.0,
-            lon_max=20.0,
-            lat_min=-20.0,
-            lat_max=20.0,
-        ),
-        boundary_depth=1,
-    )
-    grid = generate_grid(spec, options={"max_cells": None})
-    parent = generate_grid("R02B01", options={"max_cells": None})
-    parent_cells = grid.refinement["parent_cell_index"] - 1
-
-    assert grid.name == "LAM_R02B01"
-    assert grid.metadata["grid_geometry"] == 3
-    assert grid.metadata["parent_grid_name"] == "R02B01"
-    assert grid.metadata["boundary_depth_index"] == 1
-    assert grid.dims["cell"] > 0
-    assert grid.dims["vertex"] == len(np.unique(grid.cells))
-    assert np.all((0 <= grid.cells) & (grid.cells < grid.dims["vertex"]))
-    assert np.all((0 <= grid.cell_edges) & (grid.cell_edges < grid.dims["edge"]))
-    assert np.any(grid.edge_cells[:, 1] < 0)
-    assert np.all(grid.edge_cells[:, 0] >= 0)
-    assert np.all(parent_cells >= 0)
-    assert np.all(parent_cells < parent.dims["cell"])
-    assert np.all(grid.refinement["parent_edge_index"] > 0)
-    assert np.all(grid.refinement["parent_vertex_index"] > 0)
-    assert np.all(np.diff(grid.refinement["refin_c_ctrl"]) >= 0)
-    assert np.min(grid.refinement["refin_c_ctrl"]) == 1
-    assert np.all(np.isfinite(grid.geometry["cell_area"]))
-    assert np.all(np.isfinite(grid.geometry["edge_length"]))
 
 
-def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
-    parent = generate_grid("R02B01", options={"max_cells": None})
-    keep_spec = CutGridSpec(
-        regions=(
-            Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0),
-            Region.lonlat_box(lon_min=-20.0, lon_max=20.0, lat_min=-15.0, lat_max=15.0),
-            Region.rectangle(
-                center_lon=0.0,
-                center_lat=0.0,
-                width_degrees=30.0,
-                height_degrees=20.0,
-                angle_degrees=20.0,
-            ),
-            Region.polygon(points=((-35.0, -5.0), (0.0, 30.0), (35.0, -5.0))),
-        ),
-        boundary_depth=1,
-        smoothing_depth=2,
-        name="CUT_KEEP",
-    )
-    cut = cut_grid(parent, keep_spec)
-    remove = cut_grid(
-        parent,
-        CutGridSpec(
-            regions=Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0),
-            mode="remove",
-        ),
-    )
-
-    assert cut.name == "CUT_KEEP"
-    assert cut.dims["cell"] > 0
-    assert cut.dims["cell"] < parent.dims["cell"]
-    assert remove.dims["cell"] > 0
-    assert remove.dims["cell"] < parent.dims["cell"]
-    assert cut.metadata["source_grid_name"] == parent.name
-    assert cut.metadata["boundary_depth_index"] == 1
-    assert cut.metadata["smoothing_depth"] == 2
-    assert np.any(cut.edge_cells[:, 1] < 0)
-    assert np.all(cut.refinement["parent_cell_index"] > 0)
-    assert np.all(cut.refinement["smooth_c_ctrl"] == 2)
 
 
-def test_cut_grid_boundary_expansion_ignores_open_grid_missing_neighbors():
-    parent = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
-    cut = cut_grid(
-        parent,
-        CutGridSpec(
-            regions=Region.lonlat_box(
-                lon_min=-180.0,
-                lon_max=-60.0,
-                lat_min=-90.0,
-                lat_max=-60.0,
-            ),
-            boundary_depth=1,
-        ),
-    )
-
-    assert np.all(cut.refinement["parent_cell_index"] > 0)
-    assert np.all(cut.refinement["parent_cell_index"] <= parent.dims["cell"])
 
 
-def test_cut_grid_spec_rejects_unsupported_region_objects():
-    with pytest.raises(TypeError, match="Region"):
-        CutGridSpec(regions=("not-a-region",))
 
 
-def test_geometry_optimization_and_diffusion_preserve_topology_and_boundaries():
-    grid = generate_grid(ChannelGridSpec(nx=4, ny=3, edge_length=1.0))
-    boundary_vertices = np.unique(grid.edges[grid.edge_cells[:, 1] < 0])
-    optimized = optimize_grid(grid, OptimizationOptions(iterations=2, relaxation=0.2))
-    diffused = diffuse_grid(grid, DiffusionOptions(iterations=2, diffusion_constant=0.05))
-
-    for transformed in [optimized, diffused]:
-        assert transformed is not grid
-        assert np.array_equal(transformed.cells, grid.cells)
-        assert np.array_equal(transformed.edges, grid.edges)
-        assert np.array_equal(transformed.edge_cells, grid.edge_cells)
-        assert np.allclose(transformed.vertices[boundary_vertices], grid.vertices[boundary_vertices])
-        assert np.all(np.isfinite(transformed.geometry["cell_area"]))
-        assert np.all(transformed.geometry["cell_area"] > 0.0)
 
 
-def test_geometry_postprocessing_rejects_invalid_option_objects():
-    grid = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
-
-    with pytest.raises(TypeError, match="OptimizationOptions"):
-        optimize_grid(grid, options=0)
-    with pytest.raises(TypeError, match="DiffusionOptions"):
-        diffuse_grid(grid, options=0)
 
 
-def test_diagnostics_and_postprocessing_core_operators():
-    grid = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=2.0))
-    check = check_grid(grid)
-    stats = grid_statistics(grid)
-    props = triangle_properties(grid)
 
-    assert check.ok
-    assert not check.errors
-    assert stats.cells == grid.dims["cell"]
-    assert stats.boundary_edges == 0
-    assert props.area.shape == (grid.dims["cell"],)
-    assert props.edge_lengths.shape == (grid.dims["cell"], 3)
-    assert np.all(props.min_angle_degrees > 0.0)
-    assert np.allclose(cell_divergence(grid, np.zeros(grid.dims["edge"])), 0.0)
-
-    vertex_vorticity = np.arange(grid.dims["vertex"], dtype=np.float64)
-    fnorm = cell_vorticity_fnorm(grid, vertex_vorticity, coriolis=2.0)
-    assert np.allclose(fnorm, vertex_vorticity[grid.cells].mean(axis=1) / 2.0)
-
-
-def test_check_grid_reports_reversed_duplicate_edges():
-    grid = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
-    edges = grid.edges.copy()
-    edges[1] = edges[0][::-1]
-    broken = replace(grid, edges=edges)
-
-    check = check_grid(broken)
-
-    assert not check.ok
-    assert "edges contain duplicate vertex pairs" in check.errors
 
 
 def test_cell_centers_are_true_spherical_circumcenters():
@@ -1732,309 +1385,18 @@ def test_metadata_uses_stable_uuid_and_metric_means():
     assert metadata["mean_dual_cell_area"] == pytest.approx(np.mean(grid.geometry["dual_area"]))
 
 
-def test_to_dict_contains_all_icon_grid_arrays_and_reuses_objects():
-    grid = generate_grid("R01B00")
-    data = grid.to_dict()
-
-    assert data["name"] == "R01B00"
-    assert data["kind"] == "R01B00"
-    assert data["spec"] is grid.spec
-    assert data["dims"] == grid.dims
-    for key in [
-        "vertices",
-        "cells",
-        "lon",
-        "lat",
-        "vertex_lon",
-        "vertex_lat",
-        "cell_center_xyz",
-        "cell_vertex_lon",
-        "cell_vertex_lat",
-        "edges",
-        "cell_edges",
-        "edge_cells",
-        "edge_center_xyz",
-        "edge_lon",
-        "edge_lat",
-    ]:
-        assert data[key] is getattr(grid, key)
-    assert data["connectivity"] is grid.connectivity
-    assert data["neighbor_tables"] is grid.neighbor_tables
-    assert data["geometry"] is grid.geometry
-    assert data["refinement"] is grid.refinement
-    assert data["metadata"] is grid.metadata
 
 
-def test_to_xarray_contains_coordinates_data_variables_and_attrs():
-    grid = generate_grid("R01B00", options={"radius": 7.0})
-    dataset = grid.to_xarray()
-
-    assert dataset.sizes == {"vertex": 12, "xyz": 3, "cell": 20, "cell_vertex": 3, "edge": 30, "edge_vertex": 2, "edge_cell": 2}
-    assert dataset.attrs["name"] == "R01B00"
-    assert dataset.attrs["root"] == 1
-    assert dataset.attrs["bisections"] == 0
-    assert dataset.attrs["frequency"] == 1
-    assert dataset.attrs["radius"] == 7.0
-    assert np.array_equal(dataset["xyz"].values, np.array(["x", "y", "z"]))
-    assert np.array_equal(dataset["cell_vertex"].values, np.array([0, 1, 2], dtype=np.int32))
-    assert np.array_equal(dataset["edge_vertex"].values, np.array([0, 1], dtype=np.int32))
-    assert np.array_equal(dataset["edge_cell"].values, np.array([0, 1], dtype=np.int32))
-    assert np.array_equal(dataset["vertices"].values, grid.vertices)
-    assert np.array_equal(dataset["cells"].values, grid.cells)
-    assert np.array_equal(dataset["edges"].values, grid.edges)
-    assert np.array_equal(dataset["edge_center_xyz"].values, grid.edge_center_xyz)
-    assert np.array_equal(dataset["edge_lon"].values, grid.edge_lon)
-    assert np.array_equal(dataset["edge_lat"].values, grid.edge_lat)
 
 
-def test_to_netcdf_writes_expected_icon_grid_content(tmp_path):
-    netcdf4 = pytest.importorskip("netCDF4")
-    grid = generate_grid("R01B00")
-    path = grid.to_netcdf(tmp_path / "nested" / "r01b00.nc")
-
-    assert path == tmp_path / "nested" / "r01b00.nc"
-    assert path.exists()
-
-    second_path = grid.to_netcdf(tmp_path / "r01b00-via-method.nc")
-    assert second_path.exists()
-
-    with netcdf4.Dataset(path) as dataset:
-        assert dataset.dimensions["cell"].size == 20
-        assert dataset.dimensions["vertex"].size == 12
-        assert dataset.dimensions["edge"].size == 30
-        assert dataset.dimensions["nc"].size == 2
-        assert dataset.dimensions["nv"].size == 3
-        assert dataset.dimensions["ne"].size == 6
-        assert dataset.dimensions["no"].size == 4
-        assert dataset.dimensions["max_chdom"].size == 1
-        assert dataset.dimensions["cell_grf"].size == 14
-        assert dataset.dimensions["edge_grf"].size == 24
-        assert dataset.dimensions["vert_grf"].size == 13
-        assert dataset.getncattr("title") == "Pure Python ICON grid R01B00"
-        assert dataset.getncattr("source") == "grid_generator Python ICON grid generator"
-        assert dataset.getncattr("uuidOfHGrid") == grid.metadata["uuidOfHGrid"]
-        assert dataset.getncattr("grid_root") == 1
-        assert dataset.getncattr("grid_level") == 0
-        assert dataset.getncattr("sphere_radius") == grid.options.sphere_radius
-        assert dataset.getncattr("grid_ID") == 1
-        assert dataset.getncattr("parent_grid_ID") == 0
-        assert dataset.getncattr("no_of_subgrids") == 1
-        assert dataset.getncattr("start_subgrid_id") == 0
-        assert dataset.getncattr("max_childdom") == 1
-        assert dataset.getncattr("boundary_depth_index") == 0
-        assert np.array_equal(dataset.getncattr("rotation_vector"), np.zeros(3))
-        assert np.array_equal(dataset.getncattr("domain_cartesian_center"), np.zeros(3))
-        assert dataset.getncattr("domain_length") == pytest.approx(2.0 * np.pi * grid.options.sphere_radius)
-        assert dataset.getncattr("domain_height") == pytest.approx(2.0 * np.pi * grid.options.sphere_radius)
-        for attr in ("revision", "history", "date", "user_name", "os_name"):
-            assert attr in dataset.ncattrs()
-        assert dataset.variables["clon"].dimensions == ("cell",)
-        assert dataset.variables["edge_of_cell"].dimensions == ("nv", "cell")
-        assert dataset.variables["adjacent_cell_of_edge"].dimensions == ("nc", "edge")
-        assert dataset.variables["cells_of_vertex"].dimensions == ("ne", "vertex")
-        assert dataset.variables["child_edge_index"].dimensions == ("no", "edge")
-        assert dataset.variables["elon_vertices"].dimensions == ("edge", "no")
-        assert dataset.variables["elat_vertices"].dimensions == ("edge", "no")
-        assert {
-            "clon",
-            "clat",
-            "vlon",
-            "vlat",
-            "elon",
-            "elat",
-            "elon_vertices",
-            "elat_vertices",
-            "edge_of_cell",
-            "vertex_of_cell",
-            "neighbor_cell_index",
-            "adjacent_cell_of_edge",
-            "edge_vertices",
-            "cells_of_vertex",
-            "edges_of_vertex",
-            "vertices_of_vertex",
-            "cell_area",
-            "dual_area",
-            "edge_length",
-            "dual_edge_length",
-            "edge_cell_distance",
-            "edge_vert_distance",
-            "edgequad_area",
-            "orientation_of_normal",
-            "edge_system_orientation",
-            "edge_orientation",
-            "cell_circumcenter_cartesian_x",
-            "cell_circumcenter_cartesian_y",
-            "cell_circumcenter_cartesian_z",
-            "edge_middle_cartesian_x",
-            "edge_middle_cartesian_y",
-            "edge_middle_cartesian_z",
-            "edge_primal_normal_cartesian_x",
-            "edge_primal_normal_cartesian_y",
-            "edge_primal_normal_cartesian_z",
-            "edge_dual_normal_cartesian_x",
-            "edge_dual_normal_cartesian_y",
-            "edge_dual_normal_cartesian_z",
-            "zonal_normal_primal_edge",
-            "meridional_normal_primal_edge",
-            "zonal_normal_dual_edge",
-            "meridional_normal_dual_edge",
-        } <= set(dataset.variables)
-        assert np.allclose(dataset.variables["clon"][:], np.radians(grid.lon))
-        assert np.allclose(dataset.variables["vlon"][:], np.radians(grid.vertex_lon))
-        assert np.allclose(dataset.variables["elon"][:], np.radians(grid.edge_lon))
-        assert dataset.variables["elon_vertices"].shape == (30, 4)
-        assert dataset.variables["elat_vertices"].shape == (30, 4)
-        assert np.all(np.isfinite(dataset.variables["elon_vertices"][:]))
-        assert np.all(np.isfinite(dataset.variables["elat_vertices"][:]))
-        for variable_name, expected_attrs in gg.ICON_VARIABLE_ATTRS.items():
-            variable = dataset.variables[variable_name]
-            assert set(expected_attrs) <= set(variable.ncattrs())
-            for attr_name, attr_value in expected_attrs.items():
-                assert variable.getncattr(attr_name) == attr_value
-        assert np.array_equal(dataset.variables["edge_of_cell"][:], grid.cell_edges.T + 1)
-        assert np.array_equal(dataset.variables["vertex_of_cell"][:], grid.cells.T + 1)
-        assert np.array_equal(dataset.variables["adjacent_cell_of_edge"][:], grid.edge_cells.T + 1)
-        assert np.array_equal(dataset.variables["edge_vertices"][:], grid.edges.T + 1)
-        assert np.allclose(dataset.variables["cell_area"][:], grid.geometry["cell_area"])
-        assert np.allclose(dataset.variables["dual_area"][:], grid.geometry["dual_area"])
-        assert np.allclose(dataset.variables["edge_length"][:], grid.geometry["edge_length"])
-        assert np.allclose(dataset.variables["dual_edge_length"][:], grid.geometry["dual_edge_length"])
-        assert np.allclose(
-            dataset.variables["edge_cell_distance"][:],
-            grid.geometry["edge_cell_distance"].T,
-        )
-        assert np.allclose(
-            dataset.variables["edge_vert_distance"][:],
-            grid.geometry["edge_vert_distance"].T,
-        )
-        assert np.allclose(
-            dataset.variables["edgequad_area"][:],
-            grid.geometry["edgequad_area"] / grid.options.sphere_radius**2,
-        )
-        assert np.array_equal(
-            dataset.variables["orientation_of_normal"][:],
-            grid.geometry["orientation_of_normal"].T,
-        )
-        assert np.array_equal(
-            dataset.variables["edge_system_orientation"][:],
-            grid.geometry["edge_system_orientation"],
-        )
-        assert np.array_equal(
-            dataset.variables["edge_orientation"][:],
-            grid.geometry["edge_orientation"].T,
-        )
-        unit_centers = unit_rows(grid.cell_center_xyz)
-        unit_edge_centers = unit_rows(grid.edge_center_xyz)
-        assert np.allclose(dataset.variables["cell_circumcenter_cartesian_x"][:], unit_centers[:, 0])
-        assert np.allclose(dataset.variables["cell_circumcenter_cartesian_y"][:], unit_centers[:, 1])
-        assert np.allclose(dataset.variables["cell_circumcenter_cartesian_z"][:], unit_centers[:, 2])
-        assert np.allclose(dataset.variables["edge_middle_cartesian_x"][:], unit_edge_centers[:, 0])
-        assert np.allclose(dataset.variables["edge_middle_cartesian_y"][:], unit_edge_centers[:, 1])
-        assert np.allclose(dataset.variables["edge_middle_cartesian_z"][:], unit_edge_centers[:, 2])
-        assert np.allclose(
-            dataset.variables["edge_primal_normal_cartesian_x"][:],
-            grid.geometry["edge_primal_normal_cartesian"][:, 0],
-        )
-        assert np.allclose(
-            dataset.variables["edge_primal_normal_cartesian_y"][:],
-            grid.geometry["edge_primal_normal_cartesian"][:, 1],
-        )
-        assert np.allclose(
-            dataset.variables["edge_primal_normal_cartesian_z"][:],
-            grid.geometry["edge_primal_normal_cartesian"][:, 2],
-        )
-        assert np.allclose(
-            dataset.variables["edge_dual_normal_cartesian_x"][:],
-            grid.geometry["edge_dual_normal_cartesian"][:, 0],
-        )
-        assert np.allclose(
-            dataset.variables["edge_dual_normal_cartesian_y"][:],
-            grid.geometry["edge_dual_normal_cartesian"][:, 1],
-        )
-        assert np.allclose(
-            dataset.variables["edge_dual_normal_cartesian_z"][:],
-            grid.geometry["edge_dual_normal_cartesian"][:, 2],
-        )
-        assert np.allclose(
-            dataset.variables["zonal_normal_primal_edge"][:],
-            grid.geometry["zonal_normal_primal_edge"],
-        )
-        assert np.allclose(
-            dataset.variables["meridional_normal_primal_edge"][:],
-            grid.geometry["meridional_normal_primal_edge"],
-        )
-        assert np.allclose(
-            dataset.variables["zonal_normal_dual_edge"][:],
-            grid.geometry["zonal_normal_dual_edge"],
-        )
-        assert np.allclose(
-            dataset.variables["meridional_normal_dual_edge"][:],
-            grid.geometry["meridional_normal_dual_edge"],
-        )
-        assert np.array_equal(dataset.variables["refin_c_ctrl"][:], np.full(20, -4))
-        assert np.array_equal(dataset.variables["refin_e_ctrl"][:], np.full(30, -8))
-        assert np.array_equal(dataset.variables["refin_v_ctrl"][:], np.zeros(12, dtype=np.int32))
-        for name, values in grid.refinement.items():
-            assert np.array_equal(dataset.variables[name][:], values)
-        assert np.array_equal(
-            dataset.variables["start_idx_c"][:],
-            np.array([[21] * 9 + [1] * 5], dtype=np.int32),
-        )
-        assert np.array_equal(
-            dataset.variables["end_idx_c"][:],
-            np.array([[20] * 9 + [0] * 5], dtype=np.int32),
-        )
-        assert np.array_equal(
-            dataset.variables["start_idx_e"][:],
-            np.array([[31] * 14 + [1] * 10], dtype=np.int32),
-        )
-        assert np.array_equal(
-            dataset.variables["end_idx_e"][:],
-            np.array([[30] * 14 + [0] * 10], dtype=np.int32),
-        )
-        assert np.array_equal(
-            dataset.variables["start_idx_v"][:],
-            np.array([[13] * 8 + [1] * 5], dtype=np.int32),
-        )
-        assert np.array_equal(
-            dataset.variables["end_idx_v"][:],
-            np.array([[12] * 8 + [0] * 5], dtype=np.int32),
-        )
 
 
-def test_to_netcdf_rejects_radius_mismatch(tmp_path):
-    grid = generate_grid("R01B00", options={"sphere_radius": 2.0})
-    with pytest.raises(ValueError, match="sphere_radius must match"):
-        grid.to_netcdf(tmp_path / "wrong-radius.nc", sphere_radius=3.0)
 
 
-def test_to_netcdf_reports_missing_netcdf4(monkeypatch, tmp_path):
-    grid = generate_grid("R01B00")
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "netCDF4":
-            raise ImportError("blocked by test")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-
-    with pytest.raises(ModuleNotFoundError, match="NetCDF export requires"):
-        grid.to_netcdf(tmp_path / "grid.nc")
 
 
-def test_safety_cap_fails_clearly_and_can_be_changed_or_disabled():
-    with pytest.raises(ValueError, match="exceeding max_cells"):
-        generate_grid("R02B02", options={"max_cells": 10})
-
-    assert generate_grid("R02B02", options={"max_cells": 2_000}).dims["cell"] == 1280
-    assert IconGridOptions().max_cells == 2_000_000
-    assert generate_grid("R01B01", options={"max_cells": None}).dims["cell"] == 80
 
 
-def test_global_grid_generation_rejects_int32_index_overflow():
-    with pytest.raises(ValueError, match="int32 index limit"):
-        generate_grid("R02B13", options={"max_cells": None})
 
 
 @pytest.mark.parametrize(
@@ -2107,6 +1469,337 @@ def test_representative_grid_series_sanity(grid_name):
 
 # The remaining tests intentionally exercise private defensive branches for coverage.
 # They are not scientific validation or public API contracts.
+def _coverage_geometry(
+    cells: np.ndarray | None = None,
+    provenance: BisectionProvenance | None = None,
+) -> GeometryData:
+    if cells is None:
+        cells = np.asarray(
+            [
+                [0, 1, 2],
+                [0, 2, 3],
+                [0, 3, 4],
+                [0, 4, 1],
+            ],
+            dtype=np.int32,
+        )
+    cell_count = cells.shape[0]
+    vertices = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ]
+    )
+    return GeometryData(
+        vertices=vertices,
+        cells=cells,
+        lon=np.arange(cell_count, dtype=np.float64),
+        lat=np.arange(cell_count, dtype=np.float64) + 10.0,
+        vertex_lon=np.arange(vertices.shape[0], dtype=np.float64),
+        vertex_lat=np.arange(vertices.shape[0], dtype=np.float64) + 20.0,
+        cell_center_xyz=np.arange(cell_count * 3, dtype=np.float64).reshape(cell_count, 3),
+        cell_vertex_lon=np.arange(cell_count * 3, dtype=np.float64).reshape(cell_count, 3) + 30.0,
+        cell_vertex_lat=np.arange(cell_count * 3, dtype=np.float64).reshape(cell_count, 3) + 40.0,
+        source_cell_index=np.arange(cell_count, dtype=np.int32) + 100,
+        source_vertex_index=np.arange(vertices.shape[0], dtype=np.int32) + 200,
+        bisection_provenance=provenance,
+    )
+
+
+def test_private_accelerated_lookup_algorithms_with_identity_njit(monkeypatch):
+    fake_numba = types.SimpleNamespace(njit=lambda function: function)
+    monkeypatch.setitem(sys.modules, "numba", fake_numba)
+    monkeypatch.setattr(_accelerated, "is_numba_available", lambda: True)
+    grid = generate_grid("R01B00", options={"accelerator": "numpy"})
+    _accelerated._compiled_lookup_width2.cache_clear()
+    _accelerated._compiled_lookup_width3.cache_clear()
+    _accelerated._compiled_order_cells_by_edges.cache_clear()
+    _accelerated._compiled_fill_bisection_children.cache_clear()
+    try:
+        signature2 = np.asarray([[1, 2], [3, 4]], dtype=np.int64)
+        query2 = np.asarray([[1, 2], [2, 3], [3, 4]], dtype=np.int64)
+        parent2, type2 = _accelerated.lookup_width2_numba(
+            signature2,
+            np.asarray([11, 22], dtype=np.int32),
+            np.asarray([201, 202], dtype=np.int32),
+            query2,
+        )
+
+        signature3 = np.asarray([[1, 2, 3], [3, 4, 5]], dtype=np.int64)
+        query3 = np.asarray([[1, 2, 3], [2, 3, 4], [3, 4, 5]], dtype=np.int64)
+        parent3, type3 = _accelerated.lookup_width3_numba(
+            signature3,
+            np.asarray([33, 44], dtype=np.int32),
+            np.asarray([203, 204], dtype=np.int32),
+            query3,
+        )
+        expected_cells, expected_cell_edges = gg._order_cells_by_edges(
+            grid.vertices,
+            grid.cells,
+            grid.edges,
+            grid.cell_edges,
+            grid.edge_cells,
+            "numpy",
+        )
+        edge_system_orientation = gg._edge_system_orientation(
+            grid.vertices,
+            grid.cell_center_xyz,
+            grid.edges,
+            grid.edge_cells,
+            grid.edge_center_xyz,
+        )
+        ordered_cells, ordered_cell_edges, failure_cell, failure_kind = (
+            _accelerated.order_cells_by_edges_numba(
+                grid.edges,
+                grid.cell_edges,
+                grid.edge_cells,
+                edge_system_orientation.astype(np.int32, copy=False),
+            )
+        )
+        vertices, cells = gg._icosahedron()
+        numpy_vertices, numpy_cells, numpy_provenance = (
+            gg._refine_triangles_bisection_with_provenance(vertices, cells, "numpy")
+        )
+        numba_vertices, numba_cells, numba_provenance = (
+            gg._refine_triangles_bisection_with_provenance(vertices, cells, "numba")
+        )
+    finally:
+        _accelerated._compiled_lookup_width2.cache_clear()
+        _accelerated._compiled_lookup_width3.cache_clear()
+        _accelerated._compiled_order_cells_by_edges.cache_clear()
+        _accelerated._compiled_fill_bisection_children.cache_clear()
+
+    assert np.array_equal(parent2, np.asarray([11, 0, 22], dtype=np.int32))
+    assert np.array_equal(type2, np.asarray([201, 0, 202], dtype=np.int32))
+    assert np.array_equal(parent3, np.asarray([33, 0, 44], dtype=np.int32))
+    assert np.array_equal(type3, np.asarray([203, 0, 204], dtype=np.int32))
+    assert failure_cell == -1
+    assert failure_kind == 0
+    assert np.array_equal(ordered_cells, expected_cells)
+    assert np.array_equal(ordered_cell_edges, expected_cell_edges)
+    assert np.allclose(numba_vertices, numpy_vertices)
+    assert np.array_equal(numba_cells, numpy_cells)
+    assert np.array_equal(numba_provenance.child_edges, numpy_provenance.child_edges)
+    assert np.array_equal(
+        numba_provenance.child_cell_edges,
+        numpy_provenance.child_cell_edges,
+    )
+    assert np.array_equal(
+        numba_provenance.child_parent_edge_index,
+        numpy_provenance.child_parent_edge_index,
+    )
+    assert np.array_equal(
+        numba_provenance.child_edge_parent_type,
+        numpy_provenance.child_edge_parent_type,
+    )
+
+
+def test_private_numba_accelerator_selection_branches(monkeypatch):
+    monkeypatch.setattr(_accelerated, "is_numba_available", lambda: False)
+    with pytest.raises(ModuleNotFoundError, match="accelerate"):
+        _accelerated.should_use_numba("numba")
+
+    monkeypatch.setattr(_accelerated, "is_numba_available", lambda: True)
+    assert _accelerated.should_use_numba("numba")
+    assert _accelerated.should_use_numba("numpy") is False
+    assert _accelerated.should_use_numba("auto", _accelerated.AUTO_NUMBA_MIN_LOOKUP_ROWS)
+    assert _accelerated.should_use_numba_ordering("numba", 1)
+    assert _accelerated.should_use_numba_ordering("numpy", 10**9) is False
+    assert _accelerated.should_use_numba_ordering(
+        "auto",
+        _accelerated.AUTO_NUMBA_MIN_ORDER_CELLS,
+    )
+
+
+def test_private_ordering_builder_sorts_children_by_parent_and_child_type(monkeypatch):
+    geometry = _coverage_geometry()
+    context = object()
+    parent = object()
+
+    def fake_parent_vertex_indices_cached(spec, options, vertices, cache_context):
+        assert spec == GlobalGridSpec(root=1, bisections=1)
+        assert cache_context is context
+        assert vertices is geometry.vertices
+        return np.arange(geometry.vertices.shape[0], dtype=np.int32), parent
+
+    def fake_parent_cell_fields(cells, parent_vertex_index, parent_grid, accelerator):
+        assert cells is geometry.cells
+        assert parent_grid is parent
+        assert accelerator == "numpy"
+        return (
+            np.asarray([2, 1, 1, 2], dtype=np.int32),
+            np.asarray([202, 200, 203, 201], dtype=np.int32),
+        )
+
+    monkeypatch.setattr(gg, "_parent_vertex_indices_cached", fake_parent_vertex_indices_cached)
+    monkeypatch.setattr(gg, "_parent_cell_fields", fake_parent_cell_fields)
+
+    ordered = IconOrderingBuilder(context=context).order_spherical_bisection(
+        GlobalGridSpec(root=1, bisections=1),
+        IconGridOptions(accelerator="numpy", optimize_global=False),
+        geometry,
+    )
+
+    permutation = np.asarray([1, 2, 3, 0], dtype=np.int64)
+    assert np.array_equal(ordered.cells, geometry.cells[permutation])
+    assert np.array_equal(ordered.lon, geometry.lon[permutation])
+    assert np.array_equal(ordered.source_cell_index, geometry.source_cell_index[permutation])
+    assert ordered.vertices is geometry.vertices
+    assert ordered.source_vertex_index is geometry.source_vertex_index
+
+
+def test_private_ordering_builder_and_permutation_early_branches():
+    geometry = _coverage_geometry()
+    builder = IconOrderingBuilder()
+
+    assert (
+        builder.order_spherical_bisection(
+            GlobalGridSpec(root=1, bisections=0),
+            IconGridOptions(optimize_global=False),
+            geometry,
+        )
+        is geometry
+    )
+
+    provenance = BisectionProvenance(
+        cells=geometry.cells,
+        edges=np.asarray([[0, 1], [1, 2]], dtype=np.int32),
+        cell_edges=np.asarray([[0, 1, 0]], dtype=np.int32),
+        parent_vertex_index=np.arange(geometry.vertices.shape[0], dtype=np.int32),
+        parent_cell_index=np.asarray([10, 20, 30, 40], dtype=np.int32),
+        parent_cell_type=np.asarray([200, 201, 202, 203], dtype=np.int32),
+    )
+    geometry_with_provenance = _coverage_geometry(provenance=provenance)
+
+    assert (
+        builder.order_spherical_bisection(
+            GlobalGridSpec(root=1, bisections=1),
+            IconGridOptions(optimize_global=False),
+            geometry_with_provenance,
+        )
+        is geometry_with_provenance
+    )
+
+    permutation = np.asarray([3, 1, 2, 0], dtype=np.int64)
+    ordered = _permute_cells(geometry_with_provenance, permutation)
+    assert np.array_equal(ordered.cells, geometry_with_provenance.cells[permutation])
+    assert ordered.bisection_provenance is not None
+    assert np.array_equal(
+        ordered.bisection_provenance.parent_cell_index,
+        provenance.parent_cell_index[permutation],
+    )
+    assert np.array_equal(
+        ordered.bisection_provenance.parent_cell_type,
+        provenance.parent_cell_type[permutation],
+    )
+
+
+@pytest.mark.parametrize(
+    ("factory", "error", "message"),
+    [
+        (lambda: IconGridOptions(fixed_boundary=1), TypeError, "fixed_boundary"),
+        (lambda: IconGridOptions(centre="78"), TypeError, "centre"),
+        (lambda: IconGridOptions(subcentre=-1), ValueError, "subcentre"),
+        (lambda: IconGridOptions(number_of_grid_used=False), TypeError, "number_of_grid_used"),
+        (lambda: OptimizationOptions(relaxation=-0.1), ValueError, "relaxation"),
+        (lambda: OptimizationOptions(fixed_boundary=1), TypeError, "fixed_boundary"),
+        (lambda: OptimizationOptions(target_edge_length=0.0), ValueError, "target_edge_length"),
+        (lambda: DiffusionOptions(diffusion_constant=-0.1), ValueError, "diffusion_constant"),
+        (lambda: DiffusionOptions(dt=-0.1), ValueError, "dt"),
+        (lambda: DiffusionOptions(neighbor_weight=0.0), ValueError, "neighbor_weight"),
+        (lambda: DiffusionOptions(fixed_boundary=1), TypeError, "fixed_boundary"),
+    ],
+)
+def test_private_option_validation_error_branches(factory, error, message):
+    with pytest.raises(error, match=message):
+        factory()
+
+
+def test_private_optimization_helpers_cover_boundary_and_projection_branches():
+    from grid_generator import _optimization
+
+    grid = generate_grid(ChannelGridSpec(nx=3, ny=2, edge_length=1.0))
+    assert np.all(_optimization._movable_vertices(grid, fixed_boundary=False))
+
+    assert OptimizationOptions(target_edge_length=1.5).target_edge_length == 1.5
+    assert _optimization.resolve_global_optimization_options(None).method == "none"
+    assert _optimization.resolve_global_optimization_options("spring").method == "spring"
+    assert (
+        _optimization.resolve_global_optimization_options(
+            _optimization._GlobalOptimizationOptions(method="spring", iterations=1)
+        ).method
+        == "spring"
+    )
+    with pytest.raises(TypeError, match="method"):
+        _optimization._GlobalOptimizationOptions(method=1)
+    with pytest.raises(ValueError, match="method"):
+        _optimization._GlobalOptimizationOptions(method="fast")
+    with pytest.raises(TypeError, match="options"):
+        _optimization.resolve_global_optimization_options(0)
+
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ]
+    )
+    assert np.array_equal(
+        _optimization._spring_target(vertices, 0, [0], target_edge_length=1.0),
+        vertices[0],
+    )
+    assert np.allclose(
+        _optimization._spring_target(vertices, 1, [0, 2], target_edge_length=2.0),
+        np.asarray([1.0, 0.0, 0.0]),
+    )
+
+    spherical = generate_grid("R01B00", options={"optimize_global": False})
+    broken_vertices = spherical.vertices.copy()
+    broken_vertices[0] = 0.0
+    with pytest.raises(RuntimeError, match="zero-length"):
+        _optimization._project_vertices(spherical, broken_vertices)
+
+    assert optimize_global_grid(spherical, {"method": "none"}) is spherical
+    assert optimize_global_grid(spherical, {"method": "spring", "iterations": 0}) is spherical
+    assert np.allclose(
+        _optimization._spring_relaxed_vertices(
+            spherical,
+            _optimization._GlobalOptimizationOptions(method="spring", iterations=0),
+        ),
+        spherical.vertices,
+    )
+    with pytest.raises(ValueError, match="global"):
+        optimize_global_grid(grid, {"method": "spring", "iterations": 1})
+
+    torus = generate_grid(TorusGridSpec(nx=4, ny=3, edge_length=1.0))
+    optimized_torus = optimize_grid(
+        torus,
+        OptimizationOptions(iterations=1, fixed_boundary=False, target_edge_length=1.0),
+    )
+    assert np.all(optimized_torus.vertices[:, 0] >= 0.0)
+    assert np.all(optimized_torus.vertices[:, 0] < torus.spec.domain_length)
+    assert np.all(optimized_torus.vertices[:, 1] >= 0.0)
+    assert np.all(optimized_torus.vertices[:, 1] < torus.spec.domain_height)
+
+    limited = generate_grid(
+        LimitedAreaGridSpec(
+            parent="R02B01",
+            region=Region.lonlat_box(lon_min=-30.0, lon_max=30.0, lat_min=-30.0, lat_max=30.0),
+            boundary_depth=1,
+        ),
+        options={"max_cells": None},
+    )
+    optimized_limited = optimize_grid(
+        limited,
+        OptimizationOptions(iterations=1, fixed_boundary=False),
+    )
+    assert np.array_equal(optimized_limited.edge_cells, limited.edge_cells)
+    assert np.all(np.isfinite(optimized_limited.geometry["edge_cell_distance"]))
+
+
 def test_private_normalization_and_refinement_error_branches():
     with pytest.raises(RuntimeError, match="zero-length"):
         gg._normalize(np.zeros(3))

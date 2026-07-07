@@ -9,10 +9,6 @@ refinement-provenance fields needed to write a compact ICON grid NetCDF file.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
-import getpass
-from pathlib import Path
-import platform
 from typing import Any, Mapping
 import re
 import json
@@ -20,59 +16,39 @@ import uuid
 
 import numpy as np
 
-from ._geometry import SphericalIcosahedralGeometry
 from ._io import IconNetcdfWriter
 from ._limited_area import LimitedAreaExtractor
-from ._metrics import SphericalMetricsBuilder
 from ._optimization import (
     _GlobalGridOptions,
     _GlobalOptimizationOptions,
-    optimize_global_grid,
 )
-from ._ordering import IconOrderingBuilder
 from ._planar import (
     PlanarRefinementBuilder,
     PlanarTriangularGeometry,
     PlanarTriangularMetricsBuilder,
     PlanarTriangularTopologyBuilder,
 )
-from ._refinement import GlobalRefinementBuilder
-from ._topology import GlobalTopologyBuilder
 from ._torus import (
     PeriodicTopologyBuilder,
     PlanarTorusGeometry,
     PlanarTorusMetricsBuilder,
     TorusRefinementBuilder,
 )
-from ._types import BisectionProvenance, GeometryData, TopologyData
+from ._types import BisectionProvenance, GeometryData
+from ._global import (
+    _GlobalGenerationContext as _GlobalGenerationContext,
+    _GlobalParentData as _GlobalParentData,
+    _adjust_global_edge_orientation as _adjust_global_edge_orientation,
+    _generate_grid,
+    _generate_raw_global_grid as _generate_raw_global_grid,
+    _geometry_from_vertices as _geometry_from_vertices,
+    _matching_edge_indices_by_vertices as _matching_edge_indices_by_vertices,
+    _matching_unit_point_indices as _matching_unit_point_indices,
+    _nearest_unit_point_indices as _nearest_unit_point_indices,
+    _parent_vertex_indices_cached as _parent_vertex_indices_cached,
+)
 from ._validation import finite_float_option, validate_grid_options
 from . import _accelerated
-
-IconNetcdfField = tuple[str, tuple[str, ...], Any, dict[str, Any]]
-
-
-@dataclass
-class _GlobalGenerationContext:
-    """Shared internal state for one global generation request."""
-
-    grids: dict[tuple[int, int], "IconGrid"] = field(default_factory=dict)
-    parent_data: dict[tuple[int, int], "_GlobalParentData"] = field(default_factory=dict)
-    parent_vertex_indices: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
-
-    def key(self, spec: "GlobalGridSpec") -> tuple[int, int]:
-        return spec.root, spec.bisections
-
-
-@dataclass(frozen=True)
-class _GlobalParentData:
-    """Geometry and topology needed for child ordering and provenance."""
-
-    spec: "GlobalGridSpec"
-    vertices: np.ndarray
-    cells: np.ndarray
-    edges: np.ndarray
-    cell_edges: np.ndarray
-    edge_center_xyz: np.ndarray
 
 GRID_NAME_RE = re.compile(r"^R0*(\d+)B0*(\d+)$", re.IGNORECASE)
 EARTH_RADIUS_M = 6_371_229.0
@@ -105,199 +81,6 @@ EDGE_CHILD_TYPE_FROM_VERTEX_1 = 102
 EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_0 = 201
 EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_1 = 202
 EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_2 = 203
-GLOBAL_RELAXATION_LONG_ITER_CELL_THRESHOLD = 100_000
-CELL_COORD_ATTRS = {
-    "coordinates": "clon clat",
-    "grid_type": "unstructured",
-    "number_of_grid_in_reference": 1,
-}
-EDGE_COORD_ATTRS = {"coordinates": "elon elat"}
-VERTEX_COORD_ATTRS = {"coordinates": "vlon vlat"}
-ICON_VARIABLE_ATTRS: dict[str, dict[str, Any]] = {
-    "clon": {
-        "bounds": "clon_vertices",
-        "long_name": "center longitude",
-        "standard_name": "grid_longitude",
-    },
-    "clat": {
-        "bounds": "clat_vertices",
-        "long_name": "center latitude",
-        "standard_name": "grid_latitude",
-    },
-    "vlon": {"long_name": "vertex longitude", "standard_name": "grid_longitude"},
-    "vlat": {"long_name": "vertex latitude", "standard_name": "grid_latitude"},
-    "elon": {
-        "bounds": "elon_vertices",
-        "long_name": "edge midpoint longitude",
-        "standard_name": "grid_longitude",
-    },
-    "elat": {
-        "bounds": "elat_vertices",
-        "long_name": "edge midpoint latitude",
-        "standard_name": "grid_latitude",
-    },
-    "lon_cell_centre": {**CELL_COORD_ATTRS, "long_name": "longitude of cell centre"},
-    "lat_cell_centre": {**CELL_COORD_ATTRS, "long_name": "latitude of cell centre"},
-    "longitude_vertices": {**VERTEX_COORD_ATTRS, "long_name": "longitude of vertices"},
-    "latitude_vertices": {**VERTEX_COORD_ATTRS, "long_name": "latitude of vertices"},
-    "lon_edge_centre": {**EDGE_COORD_ATTRS, "long_name": "longitudes of edge midpoints"},
-    "lat_edge_centre": {**EDGE_COORD_ATTRS, "long_name": "latitudes of edge midpoints"},
-    "edge_of_cell": {"long_name": "edges of each cell"},
-    "vertex_of_cell": {"long_name": "vertices of each cell"},
-    "neighbor_cell_index": {"long_name": "cell neighbor index"},
-    "adjacent_cell_of_edge": {"long_name": "cells adjacent to each edge"},
-    "edge_vertices": {"long_name": "vertices at the end of each edge"},
-    "cells_of_vertex": {"long_name": "cells around each vertex"},
-    "edges_of_vertex": {"long_name": "edges around each vertex"},
-    "vertices_of_vertex": {"long_name": "vertices around each vertex"},
-    "cell_area": {
-        **CELL_COORD_ATTRS,
-        "long_name": "area of grid cell",
-        "standard_name": "area",
-    },
-    "dual_area": {
-        **VERTEX_COORD_ATTRS,
-        "long_name": "areas of dual hexagonal/pentagonal cells",
-        "standard_name": "area",
-    },
-    "cell_area_p": {**CELL_COORD_ATTRS, "long_name": "area of grid cell"},
-    "dual_area_p": {"long_name": "areas of dual hexagonal/pentagonal cells"},
-    "edge_length": {**EDGE_COORD_ATTRS, "long_name": "lengths of edges of triangular cells"},
-    "dual_edge_length": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "lengths of dual edges (distances between triangular cell circumcenters)",
-    },
-    "edge_cell_distance": {
-        "long_name": "distances between edge midpoint and adjacent triangle midpoints",
-    },
-    "edge_vert_distance": {
-        "long_name": "distances between edge midpoint and vertices of that edge",
-    },
-    "edgequad_area": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "area around the edge formed by the two adjacent triangles",
-    },
-    "orientation_of_normal": {"long_name": "orientations of normals to triangular cell edges"},
-    "edge_system_orientation": {**EDGE_COORD_ATTRS, "long_name": "edge system orientation"},
-    "edge_orientation": {"long_name": "edge orientation"},
-    "refin_c_ctrl": {"long_name": "refinement control flag for cells"},
-    "refin_e_ctrl": {"long_name": "refinement control flag for edges"},
-    "refin_v_ctrl": {"long_name": "refinement control flag for vertices"},
-    "start_idx_c": {"long_name": "list of start indices for each refinement control level for cells"},
-    "end_idx_c": {"long_name": "list of end indices for each refinement control level for cells"},
-    "start_idx_e": {"long_name": "list of start indices for each refinement control level for edges"},
-    "end_idx_e": {"long_name": "list of end indices for each refinement control level for edges"},
-    "start_idx_v": {"long_name": "list of start indices for each refinement control level for vertices"},
-    "end_idx_v": {"long_name": "list of end indices for each refinement control level for vertices"},
-    "cell_elevation": {**CELL_COORD_ATTRS, "long_name": "elevation at the cell centers"},
-    "edge_elevation": {**EDGE_COORD_ATTRS, "long_name": "elevation at the edge centers"},
-    "cell_sea_land_mask": {
-        **CELL_COORD_ATTRS,
-        "long_name": "sea (-2 inner, -1 boundary) land (2 inner, 1 boundary) mask for the cell",
-        "units": "2,1,-1,-",
-    },
-    "edge_sea_land_mask": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "sea (-2 inner, -1 boundary) land (2 inner, 1 boundary) mask for the cell",
-        "units": "2,1,-1,-",
-    },
-    "cartesian_x_vertices": {
-        **VERTEX_COORD_ATTRS,
-        "long_name": "vertex cartesian coordinate x on unit sp",
-    },
-    "cartesian_y_vertices": {
-        **VERTEX_COORD_ATTRS,
-        "long_name": "vertex cartesian coordinate y on unit sp",
-    },
-    "cartesian_z_vertices": {
-        **VERTEX_COORD_ATTRS,
-        "long_name": "vertex cartesian coordinate z on unit sp",
-    },
-    "cell_circumcenter_cartesian_x": {
-        **CELL_COORD_ATTRS,
-        "long_name": "cartesian position of the prime cell circumcenter on the unit sphere, coordinate x",
-    },
-    "cell_circumcenter_cartesian_y": {
-        **CELL_COORD_ATTRS,
-        "long_name": "cartesian position of the prime cell circumcenter on the unit sphere, coordinate y",
-    },
-    "cell_circumcenter_cartesian_z": {
-        **CELL_COORD_ATTRS,
-        "long_name": "cartesian position of the prime cell circumcenter on the unit sphere, coordinate z",
-    },
-    "edge_middle_cartesian_x": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "prime edge center cartesian coordinate x on unit sphere",
-    },
-    "edge_middle_cartesian_y": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "prime edge center cartesian coordinate y on unit sphere",
-    },
-    "edge_middle_cartesian_z": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "prime edge center cartesian coordinate z on unit sphere",
-    },
-    "phys_cell_id": {**CELL_COORD_ATTRS, "long_name": "physical domain ID of cell"},
-    "phys_edge_id": {**EDGE_COORD_ATTRS, "long_name": "physical domain ID of edge"},
-    "cell_index": {"long_name": "cell index"},
-    "edge_index": {"long_name": "edge index"},
-    "vertex_index": {"long_name": "vertices index"},
-    "edge_dual_middle_cartesian_x": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "dual edge center cartesian coordinate x on unit sphere",
-    },
-    "edge_dual_middle_cartesian_y": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "dual edge center cartesian coordinate y on unit sphere",
-    },
-    "edge_dual_middle_cartesian_z": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "dual edge center cartesian coordinate z on unit sphere",
-    },
-    "edge_primal_normal_cartesian_x": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "unit normal to the prime edge 3D vector, coordinate x",
-    },
-    "edge_primal_normal_cartesian_y": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "unit normal to the prime edge 3D vector, coordinate y",
-    },
-    "edge_primal_normal_cartesian_z": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "unit normal to the prime edge 3D vector, coordinate z",
-    },
-    "edge_dual_normal_cartesian_x": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "unit normal to the dual edge 3D vector, coordinate x",
-    },
-    "edge_dual_normal_cartesian_y": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "unit normal to the dual edge 3D vector, coordinate y",
-    },
-    "edge_dual_normal_cartesian_z": {
-        **EDGE_COORD_ATTRS,
-        "long_name": "unit normal to the dual edge 3D vector, coordinate z",
-    },
-    "zonal_normal_primal_edge": {"long_name": "zonal component of normal to primal edge"},
-    "meridional_normal_primal_edge": {
-        "long_name": "meridional component of normal to primal edge",
-    },
-    "zonal_normal_dual_edge": {"long_name": "zonal component of normal to dual edge"},
-    "meridional_normal_dual_edge": {
-        "long_name": "meridional component of normal to dual edge",
-    },
-    "parent_cell_index": {**CELL_COORD_ATTRS, "long_name": "parent cell index"},
-    "parent_cell_type": {"long_name": "parent cell type"},
-    "edge_parent_type": {"long_name": "edge parent type"},
-    "parent_edge_index": {"long_name": "parent edge index"},
-    "parent_vertex_index": {"long_name": "parent vertex index"},
-    "child_cell_index": {"long_name": "child cell index"},
-    "child_cell_id": {"long_name": "domain ID of child cell"},
-    "child_edge_index": {"long_name": "child edge index"},
-    "child_edge_id": {"long_name": "domain ID of child edge"},
-}
-
-
 @dataclass(frozen=True)
 class GlobalGridSpec:
     """Normalized ICON R<n>B<k> grid specification."""
@@ -1035,50 +818,7 @@ def _validate_planar_counts(name: str, nx: Any, ny: Any, *, minimum: int = 1) ->
         raise ValueError(f"{name} ny must be an integer greater than or equal to {minimum}")
 
 
-def _write_icon_grid(
-    grid: IconGrid,
-    path: str | Path,
-    *,
-    sphere_radius: float | None = None,
-) -> Path:
-    """Write a compact ICON-style NetCDF grid file."""
-    _require_complete_icon_grid(grid)
-    if sphere_radius is None:
-        sphere_radius = grid.options.sphere_radius
-    if not np.isclose(sphere_radius, grid.options.sphere_radius):
-        raise ValueError(
-            "sphere_radius must match the value used by generate_grid(); "
-            "pass options={'sphere_radius': ...} when generating the grid"
-        )
 
-    try:
-        import netCDF4 as nc
-    except ImportError as exc:
-        raise ModuleNotFoundError("NetCDF export requires the netCDF4 package") from exc
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with nc.Dataset(path, "w", format="NETCDF4") as dataset:
-        _write_icon_dimensions(dataset, grid)
-        _write_icon_attributes(dataset, grid, path)
-        for name, dims, data, attrs in _icon_fields(grid):
-            variable = dataset.createVariable(name, np.asarray(data).dtype, dims)
-            variable[:] = data
-            for attr_name, attr_value in attrs.items():
-                variable.setncattr(attr_name, attr_value)
-
-    return path
-
-
-def _require_complete_icon_grid(grid: IconGrid) -> None:
-    for name, fields in {
-        "icon_connectivity": grid.icon_connectivity,
-        "geometry": grid.geometry,
-        "refinement": grid.refinement,
-    }.items():
-        if not fields:
-            raise ValueError(f"ICON NetCDF export requires populated {name}")
 
 
 def parse_grid_spec(
@@ -1123,303 +863,30 @@ def _resolve_options(options: IconGridOptions | Mapping[str, Any] | None) -> Ico
     return IconGridOptions(**dict(options))
 
 
-def _generate_grid(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    context: _GlobalGenerationContext | None = None,
-) -> IconGrid:
-    if context is None:
-        context = _GlobalGenerationContext()
-    cache_key = context.key(spec)
-    cached = context.grids.get(cache_key)
-    if cached is not None:
-        return cached
-
-    if options.global_optimization.method == "spring":
-        grid = _generate_staged_global_grid(spec, options, context)
-    else:
-        grid = _generate_raw_global_grid(spec, options, context)
-    context.grids[cache_key] = grid
-    return grid
 
 
-def _generate_raw_global_grid(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    context: _GlobalGenerationContext,
-) -> IconGrid:
-    geometry = SphericalIcosahedralGeometry().build(spec, options)
-    geometry = IconOrderingBuilder(context).order_spherical_bisection(spec, options, geometry)
-    return _assemble_global_grid(spec, options, geometry, context)
 
 
-def _generate_staged_global_grid(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    context: _GlobalGenerationContext,
-) -> IconGrid:
-    if spec.bisections == 0:
-        return _generate_raw_global_grid(spec, options, context)
-
-    parent_spec = GlobalGridSpec(root=spec.root, bisections=spec.bisections - 1)
-    parent = _generate_grid(parent_spec, options, context)
-    vertices, cells, provenance = _refine_triangles_bisection_with_provenance(
-        parent.vertices,
-        parent.cells,
-    )
-    vertices = vertices * options.radius
-    geometry = _geometry_from_vertices(spec, options, vertices, cells, provenance)
-    grid = _assemble_global_grid(spec, options, geometry, context)
-    stage_iterations = _stage_global_optimization_iterations(options, parent)
-    if stage_iterations == 0:
-        return grid
-    return optimize_global_grid(
-        grid,
-        _GlobalOptimizationOptions(method="spring", iterations=stage_iterations),
-    )
 
 
-def _geometry_from_vertices(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    vertices: np.ndarray,
-    cells: np.ndarray,
-    provenance: BisectionProvenance | None,
-) -> GeometryData:
-    _check_expected_counts(spec, vertices, cells)
-    vertex_lon, vertex_lat = _lon_lat(vertices)
-    cell_center_xyz = _cell_centers(vertices, cells, options.radius)
-    lon, lat = _lon_lat(cell_center_xyz)
-    return GeometryData(
-        vertices=vertices,
-        cells=cells,
-        lon=lon,
-        lat=lat,
-        vertex_lon=vertex_lon,
-        vertex_lat=vertex_lat,
-        cell_center_xyz=cell_center_xyz,
-        cell_vertex_lon=vertex_lon[cells],
-        cell_vertex_lat=vertex_lat[cells],
-        bisection_provenance=provenance,
-    )
 
 
-def _stage_global_optimization_iterations(
-    options: IconGridOptions,
-    parent: IconGrid,
-) -> int:
-    iterations = options.global_optimization.iterations
-    if parent.dims["cell"] < GLOBAL_RELAXATION_LONG_ITER_CELL_THRESHOLD:
-        return iterations * 10
-    return iterations
 
 
-def _assemble_global_grid(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    geometry: GeometryData,
-    context: _GlobalGenerationContext,
-) -> IconGrid:
-    topology = GlobalTopologyBuilder().build(spec, options, geometry)
-    topology = _adjust_global_edge_orientation(
-        spec,
-        options,
-        geometry,
-        topology,
-        context,
-    )
-    metrics = SphericalMetricsBuilder().build(options, geometry, topology)
-    refinement = GlobalRefinementBuilder(context).build(spec, options, geometry, topology)
-    metadata = _metadata(spec, options, metrics.fields)
-
-    grid = IconGrid(
-        spec=spec,
-        options=options,
-        vertices=geometry.vertices,
-        cells=geometry.cells,
-        lon=geometry.lon,
-        lat=geometry.lat,
-        vertex_lon=geometry.vertex_lon,
-        vertex_lat=geometry.vertex_lat,
-        cell_center_xyz=geometry.cell_center_xyz,
-        cell_vertex_lon=geometry.cell_vertex_lon,
-        cell_vertex_lat=geometry.cell_vertex_lat,
-        edges=topology.edges,
-        cell_edges=topology.cell_edges,
-        edge_cells=topology.edge_cells,
-        edge_center_xyz=topology.edge_center_xyz,
-        edge_lon=topology.edge_lon,
-        edge_lat=topology.edge_lat,
-        icon_connectivity=topology.icon_connectivity,
-        connectivity=topology.connectivity,
-        neighbor_tables=topology.neighbor_tables,
-        geometry=metrics.fields,
-        refinement=refinement.fields,
-        metadata=metadata,
-    )
-    return grid
 
 
-def _adjust_global_edge_orientation(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    geometry: GeometryData,
-    topology: TopologyData,
-    context: _GlobalGenerationContext,
-) -> TopologyData:
-    if spec.bisections == 0:
-        return topology
-    parent_spec = GlobalGridSpec(root=spec.root, bisections=spec.bisections - 1)
-    parent = _generate_grid(parent_spec, options, context)
-    provenance = geometry.bisection_provenance
-    if provenance is None:
-        parent_vertex_index = _parent_vertex_indices(geometry.vertices, parent)
-        parent_for_mapping: IconGrid | _GlobalParentData | BisectionProvenance = parent
-        parent_normals = parent.geometry["edge_primal_normal_cartesian"]
-    else:
-        parent_vertex_index = provenance.parent_vertex_index
-        parent_for_mapping = provenance
-        parent_vertex_count = int(np.max(parent_vertex_index[parent_vertex_index > 0]))
-        provenance_edge_centers = _edge_centers(
-            geometry.vertices[:parent_vertex_count],
-            provenance.edges,
-            options.radius,
-        )
-        parent_edge_map = _nearest_unit_point_indices(
-            provenance_edge_centers,
-            parent.edge_center_xyz,
-        )
-        parent_normals = parent.geometry["edge_primal_normal_cartesian"][parent_edge_map]
-    parent_edge_index, _ = _parent_edge_fields(
-        topology.edges,
-        parent_vertex_index,
-        parent_for_mapping,
-        options.accelerator,
-    )
-
-    edge_system_orientation = _edge_system_orientation(
-        geometry.vertices,
-        geometry.cell_center_xyz,
-        topology.edges,
-        topology.edge_cells,
-        topology.edge_center_xyz,
-    )
-    child_normals = _edge_normal_fields(
-        geometry.vertices,
-        topology.edges,
-        topology.edge_center_xyz,
-        edge_system_orientation,
-    )["edge_primal_normal_cartesian"]
-    alignment = np.sum(
-        child_normals * parent_normals[parent_edge_index.astype(np.int64) - 1],
-        axis=1,
-    )
-    flip = alignment < 0.0
-    if not np.any(flip):
-        return topology
-
-    edges = topology.edges.copy()
-    edge_cells = topology.edge_cells.copy()
-    edges[flip] = edges[flip][:, ::-1]
-    edge_cells[flip] = edge_cells[flip][:, ::-1]
-
-    edge_center_xyz = _edge_centers(geometry.vertices, edges, options.radius)
-    edge_lon, edge_lat = _lon_lat(edge_center_xyz)
-    icon_connectivity = _icon_connectivity(
-        geometry.vertices,
-        geometry.cells,
-        geometry.cell_center_xyz,
-        edges,
-        topology.cell_edges,
-        edge_cells,
-    )
-    return TopologyData(
-        edges=edges,
-        cell_edges=topology.cell_edges,
-        edge_cells=edge_cells,
-        edge_center_xyz=edge_center_xyz,
-        edge_lon=edge_lon,
-        edge_lat=edge_lat,
-        icon_connectivity=icon_connectivity,
-        connectivity=_public_connectivity(
-            geometry.cells,
-            edges,
-            edge_cells,
-            icon_connectivity,
-        ),
-        neighbor_tables=_neighbor_tables(
-            geometry.cells,
-            edges,
-            edge_cells,
-            icon_connectivity,
-        ),
-        source_edge_index=topology.source_edge_index,
-    )
 
 
-def _nearest_unit_point_indices(source: np.ndarray, target: np.ndarray) -> np.ndarray:
-    unit_source = _normalize_rows(source)
-    unit_target = _normalize_rows(target)
-    block_size = 1024
-    indices = np.empty(unit_source.shape[0], dtype=np.int64)
-    for start in range(0, unit_source.shape[0], block_size):
-        stop = min(start + block_size, unit_source.shape[0])
-        distances = np.sum(
-            (unit_source[start:stop, np.newaxis, :] - unit_target[np.newaxis, :, :]) ** 2,
-            axis=2,
-        )
-        indices[start:stop] = np.argmin(distances, axis=1)
-    return indices
 
 
-def _parent_grid(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    context: _GlobalGenerationContext,
-) -> IconGrid | _GlobalParentData:
-    if spec.bisections == 0:
-        raise ValueError("grid has no bisection parent")
-    parent_spec = GlobalGridSpec(root=spec.root, bisections=spec.bisections - 1)
-    parent_key = context.key(parent_spec)
-    full_parent = context.grids.get(parent_key)
-    if full_parent is not None:
-        return full_parent
-    parent_data = context.parent_data.get(parent_key)
-    if parent_data is not None:
-        return parent_data
-
-    parent_geometry = SphericalIcosahedralGeometry().build(parent_spec, options)
-    parent_geometry = IconOrderingBuilder(context).order_spherical_bisection(
-        parent_spec,
-        options,
-        parent_geometry,
-    )
-    parent_topology = GlobalTopologyBuilder().build(parent_spec, options, parent_geometry)
-    parent_data = _GlobalParentData(
-        spec=parent_spec,
-        vertices=parent_geometry.vertices,
-        cells=parent_geometry.cells,
-        edges=parent_topology.edges,
-        cell_edges=parent_topology.cell_edges,
-        edge_center_xyz=parent_topology.edge_center_xyz,
-    )
-    context.parent_data[parent_key] = parent_data
-    return parent_data
 
 
-def _parent_vertex_indices_cached(
-    spec: GlobalGridSpec,
-    options: IconGridOptions,
-    vertices: np.ndarray,
-    context: _GlobalGenerationContext,
-) -> tuple[np.ndarray, IconGrid | _GlobalParentData]:
-    parent = _parent_grid(spec, options, context)
-    cache_key = context.key(spec)
-    parent_vertex_index = context.parent_vertex_indices.get(cache_key)
-    if parent_vertex_index is None:
-        parent_vertex_index = _parent_vertex_indices(vertices, parent)
-        context.parent_vertex_indices[cache_key] = parent_vertex_index
-    return parent_vertex_index, parent
+
+
+
+
+
+
 
 
 def _generate_torus_grid(spec: TorusGridSpec, options: IconGridOptions) -> IconGrid:
@@ -1522,7 +989,7 @@ def _generate_limited_area_grid(spec: LimitedAreaGridSpec, options: IconGridOpti
     )
 
 
-def cut_grid(grid: IconGrid, spec: CutGridSpec) -> IconGrid:
+def cut_grid(grid: Any, spec: CutGridSpec) -> IconGrid:
     """Extract an open cut grid from an existing in-memory grid."""
     from ._limited_area import cut_existing_grid
 
@@ -1918,6 +1385,7 @@ def _refine_triangles_bisection(
 def _refine_triangles_bisection_with_provenance(
     vertices: np.ndarray,
     cells: np.ndarray,
+    accelerator: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, BisectionProvenance]:
     """Split triangles into ICON-ordered bisection children and provenance."""
     edge_vertices, cell_edges, _ = _build_edges(cells)
@@ -1934,9 +1402,6 @@ def _refine_triangles_bisection_with_provenance(
 
     new_cell_count = old_cell_count * 4
     new_edge_count = old_edge_count * 2 + old_cell_count * 3
-    new_cells = np.empty((new_cell_count, 3), dtype=np.int32)
-    raw_cell_edges = np.empty((new_cell_count, 3), dtype=np.int32)
-    new_edges = np.empty((new_edge_count, 2), dtype=np.int32)
     split_edge_index = (
         2 * np.arange(old_edge_count, dtype=np.int32)[:, np.newaxis]
         + np.array([0, 1], dtype=np.int32)
@@ -1947,41 +1412,94 @@ def _refine_triangles_bisection_with_provenance(
         + np.array([0, 1, 2], dtype=np.int32)
     )
 
-    for edge_index, (first, second) in enumerate(edge_vertices):
-        midpoint = edge_midpoint_index[edge_index]
-        new_edges[split_edge_index[edge_index, 0]] = (first, midpoint)
-        new_edges[split_edge_index[edge_index, 1]] = (midpoint, second)
+    use_compiled_fill = _accelerated.should_use_numba_ordering(accelerator, new_cell_count)
+    if use_compiled_fill:
+        (
+            new_cells,
+            raw_cell_edges,
+            new_edges,
+            child_parent_edge_index,
+            child_edge_parent_type,
+            failure_cell,
+            failure_kind,
+        ) = _accelerated.fill_bisection_children_numba(
+            cells,
+            edge_vertices,
+            cell_edges,
+            edge_midpoint_index,
+            split_edge_index,
+            inner_edge_index,
+            EDGE_CHILD_TYPE_FROM_VERTEX_0,
+            EDGE_CHILD_TYPE_FROM_VERTEX_1,
+            EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_0,
+            EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_1,
+            EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_2,
+        )
+        if failure_kind == 1:
+            raise RuntimeError("parent cell edges do not share exactly one vertex")
+        if failure_kind == 2:
+            raise RuntimeError("parent vertex is not present exactly once in parent cell")
+        if failure_kind == 3:
+            raise RuntimeError("vertex is not an endpoint of parent edge")
+        if failure_cell >= 0:
+            raise RuntimeError(f"cell {failure_cell} could not be refined")
+    else:
+        new_cells = np.empty((new_cell_count, 3), dtype=np.int32)
+        raw_cell_edges = np.empty((new_cell_count, 3), dtype=np.int32)
+        new_edges = np.empty((new_edge_count, 2), dtype=np.int32)
 
-    edge_pairs_by_vertex = ((0, 1, 2), (1, 2, 0), (2, 0, 1))
-    child_slot_by_vertex = np.array([2, 3, 1], dtype=np.int32)
-    for cell_index, cell in enumerate(cells):
-        parent_edges = cell_edges[cell_index]
-        midpoints = edge_midpoint_index[parent_edges]
-        center_cell = 4 * cell_index
-        new_cells[center_cell] = midpoints
-        raw_cell_edges[center_cell] = inner_edge_index[cell_index]
+        for edge_index, (first, second) in enumerate(edge_vertices):
+            midpoint = edge_midpoint_index[edge_index]
+            new_edges[split_edge_index[edge_index, 0]] = (first, midpoint)
+            new_edges[split_edge_index[edge_index, 1]] = (midpoint, second)
 
-        for first_edge_pos, second_edge_pos, opposite_edge_pos in edge_pairs_by_vertex:
-            first_edge = parent_edges[first_edge_pos]
-            second_edge = parent_edges[second_edge_pos]
-            common_vertex = _common_edge_vertex(edge_vertices[first_edge], edge_vertices[second_edge])
-            vertex_pos = _local_vertex_position(cell, common_vertex)
-            child_cell = center_cell + int(child_slot_by_vertex[vertex_pos])
-            first_split_slot = _edge_endpoint_slot(edge_vertices[first_edge], common_vertex)
-            second_split_slot = _edge_endpoint_slot(edge_vertices[second_edge], common_vertex)
-            first_midpoint = edge_midpoint_index[first_edge]
-            second_midpoint = edge_midpoint_index[second_edge]
+        edge_pairs_by_vertex = ((0, 1, 2), (1, 2, 0), (2, 0, 1))
+        child_slot_by_vertex = np.array([2, 3, 1], dtype=np.int32)
+        for cell_index, cell in enumerate(cells):
+            parent_edges = cell_edges[cell_index]
+            midpoints = edge_midpoint_index[parent_edges]
+            center_cell = 4 * cell_index
+            new_cells[center_cell] = midpoints
+            raw_cell_edges[center_cell] = inner_edge_index[cell_index]
 
-            new_cells[child_cell] = (first_midpoint, common_vertex, second_midpoint)
-            raw_cell_edges[child_cell] = (
-                split_edge_index[first_edge, first_split_slot],
-                split_edge_index[second_edge, second_split_slot],
-                inner_edge_index[cell_index, vertex_pos],
-            )
-            new_edges[inner_edge_index[cell_index, vertex_pos]] = (
-                first_midpoint,
-                second_midpoint,
-            )
+            for first_edge_pos, second_edge_pos, opposite_edge_pos in edge_pairs_by_vertex:
+                first_edge = parent_edges[first_edge_pos]
+                second_edge = parent_edges[second_edge_pos]
+                common_vertex = _common_edge_vertex(
+                    edge_vertices[first_edge],
+                    edge_vertices[second_edge],
+                )
+                vertex_pos = _local_vertex_position(cell, common_vertex)
+                child_cell = center_cell + int(child_slot_by_vertex[vertex_pos])
+                first_split_slot = _edge_endpoint_slot(edge_vertices[first_edge], common_vertex)
+                second_split_slot = _edge_endpoint_slot(edge_vertices[second_edge], common_vertex)
+                first_midpoint = edge_midpoint_index[first_edge]
+                second_midpoint = edge_midpoint_index[second_edge]
+
+                new_cells[child_cell] = (first_midpoint, common_vertex, second_midpoint)
+                raw_cell_edges[child_cell] = (
+                    split_edge_index[first_edge, first_split_slot],
+                    split_edge_index[second_edge, second_split_slot],
+                    inner_edge_index[cell_index, vertex_pos],
+                )
+                new_edges[inner_edge_index[cell_index, vertex_pos]] = (
+                    first_midpoint,
+                    second_midpoint,
+                )
+        child_parent_edge_index = np.empty(new_edge_count, dtype=np.int32)
+        child_edge_parent_type = np.empty(new_edge_count, dtype=np.int32)
+        parent_edge_ids = np.arange(1, old_edge_count + 1, dtype=np.int32)
+        child_parent_edge_index[split_edge_index[:, 0]] = parent_edge_ids
+        child_parent_edge_index[split_edge_index[:, 1]] = parent_edge_ids
+        child_edge_parent_type[split_edge_index[:, 0]] = EDGE_CHILD_TYPE_FROM_VERTEX_0
+        child_edge_parent_type[split_edge_index[:, 1]] = EDGE_CHILD_TYPE_FROM_VERTEX_1
+        parent_cell_edges = cell_edges.astype(np.int32, copy=False) + 1
+        child_parent_edge_index[inner_edge_index[:, 0]] = parent_cell_edges[:, 1]
+        child_parent_edge_index[inner_edge_index[:, 1]] = parent_cell_edges[:, 2]
+        child_parent_edge_index[inner_edge_index[:, 2]] = parent_cell_edges[:, 0]
+        child_edge_parent_type[inner_edge_index[:, 0]] = EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_0
+        child_edge_parent_type[inner_edge_index[:, 1]] = EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_1
+        child_edge_parent_type[inner_edge_index[:, 2]] = EDGE_CHILD_TYPE_IN_CELL_OPPOSITE_VERTEX_2
 
     raw_edge_cells = _edge_cells_from_cell_edges(raw_cell_edges, new_edge_count)
     new_edges = _edge_vertices_from_cell_edges(new_cells, raw_cell_edges, raw_edge_cells)
@@ -1991,7 +1509,14 @@ def _refine_triangles_bisection_with_provenance(
         new_edges,
         raw_cell_edges,
         raw_edge_cells,
+        accelerator,
     )
+
+    if child_parent_edge_index.shape[0] != new_edge_count:
+        raise RuntimeError("generated child parent edge provenance has unexpected size")
+
+    if child_edge_parent_type.shape[0] != new_edge_count:
+        raise RuntimeError("generated child edge parent type provenance has unexpected size")
 
     parent_vertex_index = np.empty(new_vertices.shape[0], dtype=np.int32)
     parent_vertex_index[:old_vertex_count] = np.arange(
@@ -2030,6 +1555,8 @@ def _refine_triangles_bisection_with_provenance(
         child_edges=new_edges,
         child_cell_edges=new_cell_edges,
         child_edge_cells=raw_edge_cells,
+        child_parent_edge_index=child_parent_edge_index,
+        child_edge_parent_type=child_edge_parent_type,
     )
     return (
         _normalize_rows(new_vertices.astype(np.float64, copy=False)),
@@ -2039,17 +1566,25 @@ def _refine_triangles_bisection_with_provenance(
 
 
 def _common_edge_vertex(first_edge: np.ndarray, second_edge: np.ndarray) -> int:
-    common = set(map(int, first_edge)) & set(map(int, second_edge))
-    if len(common) != 1:
-        raise RuntimeError("parent cell edges do not share exactly one vertex")
-    return common.pop()
+    first_0 = int(first_edge[0])
+    first_1 = int(first_edge[1])
+    second_0 = int(second_edge[0])
+    second_1 = int(second_edge[1])
+    if first_0 == second_0 or first_0 == second_1:
+        return first_0
+    if first_1 == second_0 or first_1 == second_1:
+        return first_1
+    raise RuntimeError("parent cell edges do not share exactly one vertex")
 
 
 def _local_vertex_position(cell: np.ndarray, vertex: int) -> int:
-    matches = np.flatnonzero(cell == vertex)
-    if matches.size != 1:
-        raise RuntimeError("parent vertex is not present exactly once in parent cell")
-    return int(matches[0])
+    if int(cell[0]) == vertex:
+        return 0
+    if int(cell[1]) == vertex:
+        return 1
+    if int(cell[2]) == vertex:
+        return 2
+    raise RuntimeError("parent vertex is not present exactly once in parent cell")
 
 
 def _edge_endpoint_slot(edge: np.ndarray, vertex: int) -> int:
@@ -2061,20 +1596,33 @@ def _edge_endpoint_slot(edge: np.ndarray, vertex: int) -> int:
 
 
 def _edge_cells_from_cell_edges(cell_edges: np.ndarray, edge_count: int) -> np.ndarray:
-    edge_cells = np.full((edge_count, 2), -1, dtype=np.int32)
-    for cell_index, edges in enumerate(cell_edges):
-        for edge_index in edges:
-            if edge_cells[edge_index, 0] < 0:
-                edge_cells[edge_index, 0] = cell_index
-            elif edge_cells[edge_index, 1] < 0:
-                first = int(edge_cells[edge_index, 0])
-                edge_cells[edge_index, 0] = min(first, cell_index)
-                edge_cells[edge_index, 1] = max(first, cell_index)
-            else:
-                raise RuntimeError(f"edge {int(edge_index)} has more than two adjacent cells")
-    open_edges = np.flatnonzero(edge_cells[:, 1] < 0)
+    flat_edges = cell_edges.ravel()
+    if flat_edges.size == 0:
+        open_edges = np.arange(edge_count, dtype=np.int32)
+        if open_edges.size:
+            raise RuntimeError(f"edge {int(open_edges[0])} has 1 adjacent cells, expected 2")
+        return np.empty((0, 2), dtype=np.int32)
+
+    cell_index = np.repeat(np.arange(cell_edges.shape[0], dtype=np.int32), cell_edges.shape[1])
+    sort_order = np.argsort(flat_edges, kind="stable")
+    sorted_edges = flat_edges[sort_order]
+    sorted_cells = cell_index[sort_order]
+    counts = np.bincount(sorted_edges, minlength=edge_count)
+
+    overfull_edges = np.flatnonzero(counts > 2)
+    if overfull_edges.size:
+        raise RuntimeError(f"edge {int(overfull_edges[0])} has more than two adjacent cells")
+
+    open_edges = np.flatnonzero(counts < 2)
     if open_edges.size:
         raise RuntimeError(f"edge {int(open_edges[0])} has 1 adjacent cells, expected 2")
+
+    starts = np.empty(edge_count, dtype=np.int64)
+    starts[0] = 0
+    starts[1:] = np.cumsum(counts[:-1])
+    edge_cells = np.empty((edge_count, 2), dtype=np.int32)
+    edge_cells[:, 0] = sorted_cells[starts]
+    edge_cells[:, 1] = sorted_cells[starts + 1]
     return edge_cells
 
 
@@ -2083,18 +1631,31 @@ def _edge_vertices_from_cell_edges(
     cell_edges: np.ndarray,
     edge_cells: np.ndarray,
 ) -> np.ndarray:
-    edges = np.empty((edge_cells.shape[0], 2), dtype=np.int32)
-    for edge_index, adjacent_cells in enumerate(edge_cells):
-        cell_index = int(adjacent_cells[1])
-        if cell_index < 0:
-            cell_index = int(adjacent_cells[0])
-        local_positions = np.flatnonzero(cell_edges[cell_index] == edge_index)
-        if local_positions.size != 1:
+    edge_count = edge_cells.shape[0]
+    edge_index = np.arange(edge_count, dtype=np.int32)
+    cell_index = edge_cells[:, 1].copy()
+    open_edge = cell_index < 0
+    cell_index[open_edge] = edge_cells[open_edge, 0]
+    if np.any(cell_index < 0):
+        raise RuntimeError("edge is not present exactly once in adjacent cell")
+
+    local_positions = np.empty(edge_count, dtype=np.int8)
+    found = np.zeros(edge_count, dtype=bool)
+    selected_cell_edges = cell_edges[cell_index]
+    for position in range(3):
+        matches = selected_cell_edges[:, position] == edge_index
+        if np.any(found & matches):
             raise RuntimeError("edge is not present exactly once in adjacent cell")
-        first = int(local_positions[0])
-        edges[edge_index] = (cells[cell_index, first], cells[cell_index, (first + 1) % 3])
-        if adjacent_cells[1] < 0:
-            edges[edge_index] = edges[edge_index, ::-1]
+        local_positions[matches] = position
+        found |= matches
+    if not np.all(found):
+        raise RuntimeError("edge is not present exactly once in adjacent cell")
+
+    next_positions = (local_positions + 1) % 3
+    edges = np.empty((edge_count, 2), dtype=np.int32)
+    edges[:, 0] = cells[cell_index, local_positions]
+    edges[:, 1] = cells[cell_index, next_positions]
+    edges[open_edge] = edges[open_edge, ::-1]
     return edges
 
 
@@ -2104,6 +1665,7 @@ def _order_cells_by_edges(
     edges: np.ndarray,
     cell_edges: np.ndarray,
     edge_cells: np.ndarray,
+    accelerator: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray]:
     cell_centers = _cell_centers(vertices, cells, 1.0)
     edge_centers = _edge_centers(vertices, edges, 1.0)
@@ -2114,6 +1676,23 @@ def _order_cells_by_edges(
         edge_cells,
         edge_centers,
     )
+    if _accelerated.should_use_numba_ordering(accelerator, cells.shape[0]):
+        ordered_cells, ordered_cell_edges, failure_cell, failure_kind = (
+            _accelerated.order_cells_by_edges_numba(
+                edges,
+                cell_edges,
+                edge_cells,
+                edge_system_orientation.astype(np.int32, copy=False),
+            )
+        )
+        if failure_kind == 1:
+            raise RuntimeError("could not find next cell edge")
+        if failure_kind == 2:
+            raise RuntimeError("cell edges do not form a closed triangle")
+        if failure_cell >= 0:
+            raise RuntimeError(f"cell {failure_cell} could not be ordered")
+        return ordered_cells, ordered_cell_edges
+
     ordered_cells = np.empty_like(cells)
     ordered_cell_edges = np.empty_like(cell_edges)
     for cell_index, edges_for_cell in enumerate(cell_edges):
@@ -2127,58 +1706,32 @@ def _order_cells_by_edges(
         ordered_cells[cell_index, 0] = start_vertex
         current_edge = first_edge
         current_vertex = next_vertex
-        used_edges = {first_edge}
+        previous_edge = -1
         for output_index in range(1, 3):
-            edge_index, following_vertex = _next_cell_edge(
-                edges,
-                edges_for_cell,
-                used_edges,
-                current_vertex,
-            )
+            edge_index = -1
+            following_vertex = -1
+            for candidate in map(int, edges_for_cell):
+                if candidate == current_edge or candidate == previous_edge:
+                    continue
+                first, second = map(int, edges[candidate])
+                if first == current_vertex:
+                    edge_index = candidate
+                    following_vertex = second
+                    break
+                if second == current_vertex:
+                    edge_index = candidate
+                    following_vertex = first
+                    break
+            if edge_index < 0:
+                raise RuntimeError("could not find next cell edge")
             ordered_cell_edges[cell_index, output_index] = edge_index
             ordered_cells[cell_index, output_index] = current_vertex
-            used_edges.add(edge_index)
+            previous_edge = current_edge
             current_edge = edge_index
             current_vertex = following_vertex
         if current_vertex != start_vertex or current_edge < 0:
             raise RuntimeError("cell edges do not form a closed triangle")
     return ordered_cells, ordered_cell_edges
-
-
-def _next_cell_edge(
-    edges: np.ndarray,
-    cell_edges: np.ndarray,
-    used_edges: set[int],
-    vertex: int,
-) -> tuple[int, int]:
-    for edge_index in map(int, cell_edges):
-        if edge_index in used_edges:
-            continue
-        first, second = map(int, edges[edge_index])
-        if first == vertex:
-            return edge_index, second
-        if second == vertex:
-            return edge_index, first
-    raise RuntimeError("could not find next cell edge")
-
-
-def _cell_edge_indices(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    edges, cell_edges, _ = _build_edges(cells)
-    return edges, cell_edges
-
-
-def _orient_cells_outward(cells: np.ndarray, vertices: np.ndarray) -> np.ndarray:
-    triangles = vertices[cells]
-    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
-    inward = np.sum(normals * triangles.sum(axis=1), axis=1) < 0.0
-    if not np.any(inward):
-        return cells
-
-    oriented = cells.copy()
-    flipped = oriented[inward]
-    flipped[:, [1, 2]] = flipped[:, [2, 1]]
-    oriented[inward] = flipped
-    return oriented
 
 
 def _check_expected_counts(spec: GlobalGridSpec, vertices: np.ndarray, cells: np.ndarray) -> None:
@@ -2247,292 +1800,30 @@ def _build_edges(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     )
 
 
-def _write_icon_dimensions(dataset: Any, grid: IconGrid) -> None:
-    dataset.createDimension("cell", grid.dims["cell"])
-    dataset.createDimension("vertex", grid.dims["vertex"])
-    dataset.createDimension("edge", grid.dims["edge"])
-    for name, size in FIXED_DIMS.items():
-        dataset.createDimension(name, size)
 
 
-def _write_icon_attributes(dataset: Any, grid: IconGrid, path: Path) -> None:
-    external_attrs = {
-        "revision": "pure-python",
-        "history": f"grid.to_netcdf {path}",
-        "date": datetime.now().strftime("%Y%m%d at %H%M%S"),
-        "user_name": getpass.getuser(),
-        "os_name": platform.platform(),
-        "grid_ID": 1,
-        "parent_grid_ID": 0,
-        "no_of_subgrids": 1,
-        "start_subgrid_id": 0,
-        "max_childdom": 1,
-        "boundary_depth_index": 0,
-        "rotation_vector": np.zeros(3, dtype=np.float64),
-        "domain_length": grid.metadata.get(
-            "domain_length",
-            2.0 * np.pi * grid.options.sphere_radius,
-        ),
-        "domain_height": grid.metadata.get(
-            "domain_height",
-            2.0 * np.pi * grid.options.sphere_radius,
-        ),
-        "domain_cartesian_center": np.zeros(3, dtype=np.float64),
-    }
-    attrs = {
-        "title": f"Pure Python ICON grid {grid.name}",
-        "institution": "grid_generator",
-        "source": "grid_generator Python ICON grid generator",
-        "ICON_grid_file_uri": str(path),
-        **external_attrs,
-        **grid.metadata,
-    }
-    for name, value in attrs.items():
-        dataset.setncattr(name, value)
 
 
-def _icon_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    fields = (
-        _coordinate_fields(grid)
-        + _connectivity_fields(grid)
-        + _metric_fields(grid)
-        + _refinement_fields_for_netcdf(grid)
-        + _static_surface_fields(grid)
-        + _cartesian_fields(grid)
-        + _normal_vector_fields(grid)
-        + _hierarchy_fields(grid)
-    )
-    return [
-        (name, dims, data, _with_icon_variable_attrs(name, attrs))
-        for name, dims, data, attrs in fields
-    ]
 
 
-def _coordinate_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    edge_bounds_lon, edge_bounds_lat = _edge_lon_lat_bounds(grid)
-    return [
-        ("clon", ("cell",), np.radians(grid.lon), {"units": "radian"}),
-        ("clat", ("cell",), np.radians(grid.lat), {"units": "radian"}),
-        ("clon_vertices", ("cell", "nv"), np.radians(grid.cell_vertex_lon), {"units": "radian"}),
-        ("clat_vertices", ("cell", "nv"), np.radians(grid.cell_vertex_lat), {"units": "radian"}),
-        ("vlon", ("vertex",), np.radians(grid.vertex_lon), {"units": "radian"}),
-        ("vlat", ("vertex",), np.radians(grid.vertex_lat), {"units": "radian"}),
-        ("elon", ("edge",), np.radians(grid.edge_lon), {"units": "radian"}),
-        ("elat", ("edge",), np.radians(grid.edge_lat), {"units": "radian"}),
-        ("elon_vertices", ("edge", "no"), edge_bounds_lon, {"units": "radian"}),
-        ("elat_vertices", ("edge", "no"), edge_bounds_lat, {"units": "radian"}),
-        ("lon_cell_centre", ("cell",), np.radians(grid.lon), {"units": "radian"}),
-        ("lat_cell_centre", ("cell",), np.radians(grid.lat), {"units": "radian"}),
-        ("longitude_vertices", ("vertex",), np.radians(grid.vertex_lon), {"units": "radian"}),
-        ("latitude_vertices", ("vertex",), np.radians(grid.vertex_lat), {"units": "radian"}),
-        ("lon_edge_centre", ("edge",), np.radians(grid.edge_lon), {"units": "radian"}),
-        ("lat_edge_centre", ("edge",), np.radians(grid.edge_lat), {"units": "radian"}),
-    ]
 
 
-def _connectivity_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    connectivity = grid.icon_connectivity
-    return [
-        ("edge_of_cell", ("nv", "cell"), connectivity["c2e"].T + 1, {}),
-        ("vertex_of_cell", ("nv", "cell"), grid.cells.T + 1, {}),
-        ("neighbor_cell_index", ("nv", "cell"), connectivity["c2c"].T + 1, {}),
-        ("adjacent_cell_of_edge", ("nc", "edge"), grid.edge_cells.T + 1, {}),
-        ("edge_vertices", ("nc", "edge"), grid.edges.T + 1, {}),
-        ("cells_of_vertex", ("ne", "vertex"), connectivity["v2c"].T, {}),
-        ("edges_of_vertex", ("ne", "vertex"), connectivity["v2e"].T, {}),
-        ("vertices_of_vertex", ("ne", "vertex"), connectivity["v2v"].T, {}),
-    ]
 
 
-def _metric_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    geometry = grid.geometry
-    edgequad_normalizer = (
-        1.0 if grid.metadata.get("grid_geometry") == 2 else grid.options.sphere_radius**2
-    )
-    return [
-        ("cell_area", ("cell",), geometry["cell_area"], {"units": "m2"}),
-        ("dual_area", ("vertex",), geometry["dual_area"], {"units": "m2"}),
-        ("cell_area_p", ("cell",), geometry["cell_area"], {"units": "m2"}),
-        ("dual_area_p", ("vertex",), geometry["dual_area"], {"units": "m2"}),
-        ("edge_length", ("edge",), geometry["edge_length"], {"units": "m"}),
-        ("dual_edge_length", ("edge",), geometry["dual_edge_length"], {"units": "m"}),
-        ("edge_cell_distance", ("nc", "edge"), geometry["edge_cell_distance"].T, {"units": "m"}),
-        ("edge_vert_distance", ("nc", "edge"), geometry["edge_vert_distance"].T, {"units": "m"}),
-        (
-            "edgequad_area",
-            ("edge",),
-            geometry["edgequad_area"] / edgequad_normalizer,
-            {"units": "m2"},
-        ),
-        ("orientation_of_normal", ("nv", "cell"), geometry["orientation_of_normal"].T, {}),
-        ("edge_system_orientation", ("edge",), geometry["edge_system_orientation"], {}),
-        ("edge_orientation", ("ne", "vertex"), geometry["edge_orientation"].T, {}),
-    ]
 
 
-def _refinement_fields_for_netcdf(grid: IconGrid) -> list[IconNetcdfField]:
-    refinement = grid.refinement
-    return [
-        ("refin_c_ctrl", ("cell",), refinement["refin_c_ctrl"], {}),
-        ("refin_e_ctrl", ("edge",), refinement["refin_e_ctrl"], {}),
-        ("refin_v_ctrl", ("vertex",), refinement["refin_v_ctrl"], {}),
-        ("start_idx_c", ("max_chdom", "cell_grf"), refinement["start_idx_c"], {}),
-        ("end_idx_c", ("max_chdom", "cell_grf"), refinement["end_idx_c"], {}),
-        ("start_idx_e", ("max_chdom", "edge_grf"), refinement["start_idx_e"], {}),
-        ("end_idx_e", ("max_chdom", "edge_grf"), refinement["end_idx_e"], {}),
-        ("start_idx_v", ("max_chdom", "vert_grf"), refinement["start_idx_v"], {}),
-        ("end_idx_v", ("max_chdom", "vert_grf"), refinement["end_idx_v"], {}),
-    ]
 
 
-def _static_surface_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    zeros_cell = np.zeros(grid.dims["cell"], dtype=np.float64)
-    zeros_edge = np.zeros(grid.dims["edge"], dtype=np.float64)
-    return [
-        ("cell_elevation", ("cell",), zeros_cell, {"units": "m"}),
-        ("edge_elevation", ("edge",), zeros_edge, {"units": "m"}),
-        ("cell_sea_land_mask", ("cell",), np.zeros(grid.dims["cell"], dtype=np.int32), {}),
-        ("edge_sea_land_mask", ("edge",), np.zeros(grid.dims["edge"], dtype=np.int32), {}),
-    ]
 
 
-def _cartesian_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    if grid.metadata.get("grid_geometry") == 2:
-        unit_vertices = grid.vertices
-        unit_centers = grid.cell_center_xyz
-        unit_edge_centers = grid.edge_center_xyz
-    else:
-        unit_vertices = _normalize_rows(grid.vertices)
-        unit_centers = _normalize_rows(grid.cell_center_xyz)
-        unit_edge_centers = _normalize_rows(grid.edge_center_xyz)
-    return [
-        ("cartesian_x_vertices", ("vertex",), unit_vertices[:, 0], {"units": "meters"}),
-        ("cartesian_y_vertices", ("vertex",), unit_vertices[:, 1], {"units": "meters"}),
-        ("cartesian_z_vertices", ("vertex",), unit_vertices[:, 2], {"units": "meters"}),
-        ("cell_circumcenter_cartesian_x", ("cell",), unit_centers[:, 0], {"units": "meters"}),
-        ("cell_circumcenter_cartesian_y", ("cell",), unit_centers[:, 1], {"units": "meters"}),
-        ("cell_circumcenter_cartesian_z", ("cell",), unit_centers[:, 2], {"units": "meters"}),
-        ("edge_middle_cartesian_x", ("edge",), unit_edge_centers[:, 0], {"units": "meters"}),
-        ("edge_middle_cartesian_y", ("edge",), unit_edge_centers[:, 1], {"units": "meters"}),
-        ("edge_middle_cartesian_z", ("edge",), unit_edge_centers[:, 2], {"units": "meters"}),
-        ("phys_cell_id", ("cell",), np.arange(1, grid.dims["cell"] + 1, dtype=np.int32), {}),
-        ("phys_edge_id", ("edge",), np.arange(1, grid.dims["edge"] + 1, dtype=np.int32), {}),
-        ("cell_index", ("cell",), np.arange(1, grid.dims["cell"] + 1, dtype=np.int32), {}),
-        ("edge_index", ("edge",), np.arange(1, grid.dims["edge"] + 1, dtype=np.int32), {}),
-        ("vertex_index", ("vertex",), np.arange(1, grid.dims["vertex"] + 1, dtype=np.int32), {}),
-        ("edge_dual_middle_cartesian_x", ("edge",), unit_edge_centers[:, 0], {"units": "meters"}),
-        ("edge_dual_middle_cartesian_y", ("edge",), unit_edge_centers[:, 1], {"units": "meters"}),
-        ("edge_dual_middle_cartesian_z", ("edge",), unit_edge_centers[:, 2], {"units": "meters"}),
-    ]
 
 
-def _normal_vector_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    geometry = grid.geometry
-    return [
-        (
-            "edge_primal_normal_cartesian_x",
-            ("edge",),
-            geometry["edge_primal_normal_cartesian"][:, 0],
-            {"units": "meters"},
-        ),
-        (
-            "edge_primal_normal_cartesian_y",
-            ("edge",),
-            geometry["edge_primal_normal_cartesian"][:, 1],
-            {"units": "meters"},
-        ),
-        (
-            "edge_primal_normal_cartesian_z",
-            ("edge",),
-            geometry["edge_primal_normal_cartesian"][:, 2],
-            {"units": "meters"},
-        ),
-        (
-            "edge_dual_normal_cartesian_x",
-            ("edge",),
-            geometry["edge_dual_normal_cartesian"][:, 0],
-            {"units": "meters"},
-        ),
-        (
-            "edge_dual_normal_cartesian_y",
-            ("edge",),
-            geometry["edge_dual_normal_cartesian"][:, 1],
-            {"units": "meters"},
-        ),
-        (
-            "edge_dual_normal_cartesian_z",
-            ("edge",),
-            geometry["edge_dual_normal_cartesian"][:, 2],
-            {"units": "meters"},
-        ),
-        ("zonal_normal_primal_edge", ("edge",), geometry["zonal_normal_primal_edge"], {"units": "radian"}),
-        (
-            "meridional_normal_primal_edge",
-            ("edge",),
-            geometry["meridional_normal_primal_edge"],
-            {"units": "radian"},
-        ),
-        ("zonal_normal_dual_edge", ("edge",), geometry["zonal_normal_dual_edge"], {"units": "radian"}),
-        (
-            "meridional_normal_dual_edge",
-            ("edge",),
-            geometry["meridional_normal_dual_edge"],
-            {"units": "radian"},
-        ),
-    ]
 
 
-def _hierarchy_fields(grid: IconGrid) -> list[IconNetcdfField]:
-    refinement = grid.refinement
-    return [
-        ("parent_cell_index", ("cell",), refinement["parent_cell_index"], {}),
-        ("parent_cell_type", ("cell",), refinement["parent_cell_type"], {}),
-        ("edge_parent_type", ("edge",), refinement["edge_parent_type"], {}),
-        ("parent_edge_index", ("edge",), refinement["parent_edge_index"], {}),
-        ("parent_vertex_index", ("vertex",), refinement["parent_vertex_index"], {}),
-        ("child_cell_index", ("no", "cell"), np.zeros((4, grid.dims["cell"]), dtype=np.int32), {}),
-        ("child_cell_id", ("cell",), np.zeros(grid.dims["cell"], dtype=np.int32), {}),
-        ("child_edge_index", ("no", "edge"), np.zeros((4, grid.dims["edge"]), dtype=np.int32), {}),
-        ("child_edge_id", ("edge",), np.zeros(grid.dims["edge"], dtype=np.int32), {}),
-    ]
 
 
-def _with_icon_variable_attrs(name: str, attrs: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(ICON_VARIABLE_ATTRS.get(name, {}))
-    merged.update(attrs)
-    return merged
 
 
-def _edge_lon_lat_bounds(grid: IconGrid) -> tuple[np.ndarray, np.ndarray]:
-    """Return ICON-style four-point edge bounds in radians.
-
-    The upstream grid generator stores bounds for each edge as a quadrilateral:
-    first edge vertex, second adjacent cell center, second edge vertex, first
-    adjacent cell center.
-    """
-    edge_vertices = np.asarray(grid.edges, dtype=np.int32)
-    edge_cells = np.asarray(grid.edge_cells, dtype=np.int32)
-    lon = np.empty((grid.dims["edge"], 4), dtype=np.float64)
-    lat = np.empty((grid.dims["edge"], 4), dtype=np.float64)
-
-    lon[:, 0] = grid.vertex_lon[edge_vertices[:, 0]]
-    lat[:, 0] = grid.vertex_lat[edge_vertices[:, 0]]
-    second_cell = edge_cells[:, 1]
-    second_cell_lon = np.where(second_cell >= 0, grid.lon[np.maximum(second_cell, 0)], grid.edge_lon)
-    second_cell_lat = np.where(second_cell >= 0, grid.lat[np.maximum(second_cell, 0)], grid.edge_lat)
-    lon[:, 1] = second_cell_lon
-    lat[:, 1] = second_cell_lat
-    lon[:, 2] = grid.vertex_lon[edge_vertices[:, 1]]
-    lat[:, 2] = grid.vertex_lat[edge_vertices[:, 1]]
-    first_cell = edge_cells[:, 0]
-    first_cell_lon = np.where(first_cell >= 0, grid.lon[np.maximum(first_cell, 0)], grid.edge_lon)
-    first_cell_lat = np.where(first_cell >= 0, grid.lat[np.maximum(first_cell, 0)], grid.edge_lat)
-    lon[:, 3] = first_cell_lon
-    lat[:, 3] = first_cell_lat
-
-    pole_mask = np.isclose(np.abs(lat), 90.0)
-    lon[pole_mask] = np.repeat(grid.edge_lon[:, np.newaxis], 4, axis=1)[pole_mask]
-    return np.radians(lon), np.radians(lat)
 
 
 def _zeros_fixed(name: str) -> np.ndarray:
@@ -2896,9 +2187,17 @@ def _refinement_fields(
     refinement["parent_vertex_index"] = parent_vertex_index
     refinement["parent_cell_index"] = parent_cell_index
     refinement["parent_cell_type"] = parent_cell_type
-    refinement["parent_edge_index"], refinement["edge_parent_type"] = (
-        _parent_edge_fields(edges, parent_vertex_index, parent, options.accelerator)
-    )
+    if (
+        isinstance(parent, BisectionProvenance)
+        and parent.child_parent_edge_index is not None
+        and parent.child_edge_parent_type is not None
+    ):
+        refinement["parent_edge_index"] = parent.child_parent_edge_index
+        refinement["edge_parent_type"] = parent.child_edge_parent_type
+    else:
+        refinement["parent_edge_index"], refinement["edge_parent_type"] = (
+            _parent_edge_fields(edges, parent_vertex_index, parent, options.accelerator)
+        )
     return refinement
 
 

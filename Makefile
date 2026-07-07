@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-.PHONY: check test lint docs package drift-check contract-compare clean
+.PHONY: check test perf-check lint docs package drift-check contract-compare clean
 
 check: lint test docs drift-check
 
@@ -8,7 +8,10 @@ lint:
 	$(PYTHON) -m ruff check .
 
 test:
-	$(PYTHON) -m pytest -q
+	$(PYTHON) -m pytest -q -m "not performance"
+
+perf-check:
+	GRID_GENERATOR_PERF_TESTS=1 $(PYTHON) -m pytest -q -m performance
 
 docs:
 	$(PYTHON) -m mkdocs build --strict

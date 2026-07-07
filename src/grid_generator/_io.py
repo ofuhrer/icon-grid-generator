@@ -16,6 +16,6 @@ class IconNetcdfWriter:
         *,
         sphere_radius: float | None = None,
     ) -> Path:
-        from . import grid_generator as gg
+        from ._netcdf import write_icon_grid
 
-        return gg._write_icon_grid(grid, path, sphere_radius=sphere_radius)
+        return write_icon_grid(grid, path, sphere_radius=sphere_radius)

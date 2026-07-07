@@ -27,6 +27,10 @@ deterministic pipeline:
   unless they support an existing public API use case.
 - Global, planar, limited-area, optimization, diffusion, diagnostics, and
   NetCDF export features should share the `IconGrid` data model.
+- `grid_generator.py` is the public facade. Keep large implementation concerns
+  in focused private modules such as `_global.py`, `_netcdf.py`, `_planar.py`,
+  and `_limited_area.py`; preserve thin private aliases only where internal
+  builders/tests still rely on them.
 - Triangular grids are the supported cell family. Add other cell families only
   with explicit public API, NetCDF, and diagnostic contracts.
 - Ragged planar grids are deterministic Python variants; test structural
@@ -34,6 +38,20 @@ deterministic pipeline:
   regular planar grids.
 - Parent/provenance indices belong in `IconGrid.refinement`; metadata should
   carry descriptive scalar attributes only.
+
+## Architectural Decisions
+
+- Global grid generation uses staged spring relaxation by default; raw
+  bisection remains available with `optimize_global=False` for diagnostics and
+  topology checks.
+- Optional Numba acceleration is an implementation detail selected through
+  `IconGridOptions.accelerator`; NumPy remains the required baseline.
+- UUIDs use deterministic UUIDv5 payloads derived from canonical specs and
+  options. Any payload change is a compatibility change.
+- NetCDF export is an internal module boundary. Public users should call
+  `IconGrid.to_netcdf(path)`.
+- Performance checks live behind `make perf-check` and are intentionally
+  separate from default CI-style checks because runtime varies with local load.
 
 ## Limitations
 

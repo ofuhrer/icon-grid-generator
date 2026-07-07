@@ -7,13 +7,19 @@ public API documented in `README.md` and `docs/api.md`.
 ## Code Map
 
 - `src/grid_generator/grid_generator.py`: public specs, `IconGrid`, generation
-  facade, metadata, UUIDs, and NetCDF field assembly.
-- `src/grid_generator/_geometry.py`, `_topology.py`, `_metrics.py`,
-  `_refinement.py`: spherical grid pipeline.
+  facade, metadata, UUIDs, and shared geometry/connectivity helpers.
+- `src/grid_generator/_global.py`, `_geometry.py`, `_topology.py`,
+  `_metrics.py`, `_refinement.py`: spherical grid pipeline.
+- `src/grid_generator/_netcdf.py`, `_io.py`: ICON-style NetCDF field assembly
+  and writing boundary.
 - `src/grid_generator/_torus.py`, `_planar.py`, `_limited_area.py`: planar and
   regional variants.
 - `src/grid_generator/_diagnostics.py`, `_optimization.py`: optional utilities.
-- `tests/test_grid_generator.py`: contract and regression coverage.
+- `tests/test_grid_generator.py`: global geometry/topology/refinement contract
+  coverage.
+- `tests/test_api.py`, `test_netcdf.py`, `test_planar_limited_area.py`,
+  `test_diagnostics_transforms.py`, `test_performance.py`: focused public API,
+  export, regional/planar, utility, and performance coverage.
 
 ## Repository Intelligence
 
@@ -87,6 +93,10 @@ Before handing work back from an agent session, run the full local check:
 ```bash
 make check
 ```
+
+Run `make perf-check` after performance-sensitive grid-generation changes. It
+uses ignored local subprocess benchmarks and is intentionally not part of the
+default check because timings are hardware- and load-dependent.
 
 If a change touches public specs, `generate_grid()`, `IconGrid`, NetCDF export,
 metadata, UUIDs, or examples, update the matching README/docs/API text and tests

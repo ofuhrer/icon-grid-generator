@@ -189,7 +189,7 @@ def _validate_iterations(name: str, value: Any) -> None:
 
 def _spring_relaxed_vertices(grid: Any, opts: _GlobalOptimizationOptions) -> np.ndarray:
     vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
-    vertices = _normalize_force_rows(vertices)
+    _normalize_force_rows_inplace(vertices)
     edges = np.asarray(grid.edges, dtype=np.int64)
     global_grid = getattr(grid.options, "global_grid", _GlobalGridOptions())
     beta_spring = global_grid.beta_spring
@@ -204,8 +204,17 @@ def _spring_relaxed_vertices(grid: Any, opts: _GlobalOptimizationOptions) -> np.
     len0 = beta_spring * mean_edge_length * 1.164
     velocity = np.zeros_like(vertices)
     movable = _movable_vertices(grid, global_grid.fixed_boundary)
+    all_movable = bool(np.all(movable))
+    fixed_vertices = None if all_movable else vertices[~movable].copy()
     max_ekin = 0.0
     max_test = 0.0
+    edge_start_vertices = np.empty((edges.shape[0], 3), dtype=np.float64)
+    edge_force = np.empty((edges.shape[0], 3), dtype=np.float64)
+    edge_dot = np.empty(edges.shape[0], dtype=np.float64)
+    edge_scale = np.empty(edges.shape[0], dtype=np.float64)
+    spring = np.empty_like(vertices)
+    vertex_dot = np.empty(vertices.shape[0], dtype=np.float64)
+    inv_sqrt2 = 1.0 / np.sqrt(2.0)
 
     for iteration in range(1, maxit + 1):
         if iteration <= 50:
@@ -215,31 +224,38 @@ def _spring_relaxed_vertices(grid: Any, opts: _GlobalOptimizationOptions) -> np.
         else:
             dt = 8.0e-2
 
-        v_start = vertices[edge_start]
-        v_end = vertices[edge_end]
-        edge_dot = np.sum(v_start * v_end, axis=1)
-        edge_dot = np.clip(edge_dot, -1.0, 1.0)
-        denominator = np.sqrt(np.maximum(1.0 - edge_dot, np.finfo(np.float64).eps))
-        edge_direction = (v_end - v_start) / denominator[:, np.newaxis]
-        edge_factor = np.arccos(edge_dot) - len0
-        edge_force = edge_factor[:, np.newaxis] * edge_direction
+        np.take(vertices, edge_start, axis=0, out=edge_start_vertices)
+        np.take(vertices, edge_end, axis=0, out=edge_force)
+        edge_force -= edge_start_vertices
+        np.einsum("ij,ij->i", edge_start_vertices, edge_force, out=edge_dot)
+        edge_dot += 1.0
+        np.clip(edge_dot, -1.0, 1.0, out=edge_dot)
+        np.subtract(1.0, edge_dot, out=edge_scale)
+        np.maximum(edge_scale, np.finfo(np.float64).eps, out=edge_scale)
+        np.sqrt(edge_scale, out=edge_scale)
+        np.arccos(edge_dot, out=edge_dot)
+        edge_dot -= len0
+        edge_scale = np.divide(edge_dot, edge_scale, out=edge_scale)
+        edge_force *= edge_scale[:, np.newaxis]
 
-        spring = np.zeros_like(vertices)
+        spring.fill(0.0)
         np.add.at(spring, edge_start, edge_force)
         np.add.at(spring, edge_end, -edge_force)
-        spring /= np.sqrt(2.0)
-        spring[~movable] = 0.0
+        spring *= inv_sqrt2
+        if not all_movable:
+            spring[~movable] = 0.0
 
-        rhs = spring - velocity
-        previous = vertices.copy()
-        vertices = previous + dt * velocity
-        vertices = _normalize_force_rows(vertices)
-        vertices[~movable] = previous[~movable]
+        vertices += dt * velocity
+        _normalize_force_rows_inplace(vertices)
+        if not all_movable:
+            vertices[~movable] = fixed_vertices
 
-        new_velocity = velocity + dt * rhs
-        new_velocity -= np.sum(new_velocity * vertices, axis=1)[:, np.newaxis] * vertices
-        new_velocity[~movable] = 0.0
-        velocity = new_velocity
+        velocity *= 1.0 - dt
+        velocity += dt * spring
+        np.einsum("ij,ij->i", velocity, vertices, out=vertex_dot)
+        velocity -= vertex_dot[:, np.newaxis] * vertices
+        if not all_movable:
+            velocity[~movable] = 0.0
 
         ekin = 0.5 * float(np.sum(velocity * velocity))
         test = float(np.sum(spring * spring))
@@ -259,6 +275,14 @@ def _normalize_force_rows(values: np.ndarray) -> np.ndarray:
     normalized[active] /= norms[active, np.newaxis]
     normalized[~active] = 0.0
     return normalized
+
+
+def _normalize_force_rows_inplace(values: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(values, axis=1)
+    active = norms > 0.0
+    values[active] /= norms[active, np.newaxis]
+    values[~active] = 0.0
+    return values
 
 
 def _vertex_adjacency(grid: Any) -> list[list[int]]:
