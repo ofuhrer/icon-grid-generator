@@ -32,7 +32,10 @@ from grid_generator.visualization import write_svg  # noqa: E402
 
 
 FIGURE_DIR = PROJECT_ROOT / "docs" / "assets" / "examples"
-SVG_COORDINATE_TOLERANCE = 0.1
+# Relaxed global coordinates can differ by a few pixels across libm/NumPy
+# platform combinations. The checked-in figures are release artifacts, so the
+# check verifies visual equivalence rather than byte-for-byte SVG identity.
+SVG_COORDINATE_TOLERANCE = 5.0
 FigureBuilder = Callable[[Path], None]
 
 
