@@ -40,11 +40,17 @@ public API documented in `README.md` and `docs/api.md`.
   `/api/graph/{repo_id}/path`, `/api/repos/{repo_id}/overview-summary`,
   `/api/repos/{repo_id}/health/overview`, and
   `/api/repos/{repo_id}/risk/range`.
+- Before trusting repowise results, compare the repo's `head_commit` from
+  `/api/repos` with `git rev-parse HEAD`. If they differ, refresh repowise with
+  `POST /api/repos/{repo_id}/index` for source/API changes, or
+  `POST /api/repos/{repo_id}/sync` for lighter documentation syncs, then query
+  again. Treat stale repowise output as orientation only.
 - Use codebase-memory MCP tools (`search_graph`, `trace_path`,
   `get_code_snippet`, `query_graph`, `search_code`) only when repowise is not
   reachable, when repowise lacks the needed detail, or when a task explicitly
   needs the codebase-memory graph. Be aware that codebase-memory may be stale;
-  index the repository first if freshness matters.
+  call `index_repository` first if freshness matters or new symbols/files were
+  added.
 - Treat repowise as contextual intelligence, not a replacement for source
   verification. For exact behavior, verify with code snippets/local files and
   the required checks.

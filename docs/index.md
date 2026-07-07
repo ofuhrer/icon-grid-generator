@@ -7,8 +7,7 @@ grids without depending on ICON model runtimes or stencil frameworks.
 
 ## What It Provides
 
-- Global spherical ICON `R<n>B<k>` grids, including compact string parsing such
-  as `R2B3` and canonical zero-padded names such as `R02B03`.
+- Global spherical ICON `R<n>B<k>` grids.
 - Planar torus and open planar triangular grids for local experiments.
 - Limited-area grids extracted from generated global parent grids.
 - ICON-style NetCDF export when the optional `netCDF4` dependency is installed.

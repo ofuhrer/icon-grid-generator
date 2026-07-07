@@ -40,7 +40,7 @@ raw bisection topology for diagnostics or tests.
 
 ## What You Can Generate
 
-- Global spherical ICON grids from names such as `R2B4` or `R02B04`.
+- Global spherical ICON grids from standard `R<n>B<k>` names.
 - Planar triangular torus, channel, and parallelogram grids for experiments.
 - Limited-area grids extracted from generated global parent grids.
 - ICON-style NetCDF grid files when the optional `netCDF4` dependency is
@@ -96,9 +96,7 @@ python -m pip install -e ".[test,docs]"
 The ICON documentation describes grid file names with the generic nomenclature
 [`R<n>B<k>`](https://docs.icon-model.org/documentation/buildrun/buildrun_input_data.html),
 where `n` is the number of root divisions and `k` is the number of subsequent
-bisections. ICON examples also commonly use zero-padded grid file names such as
-`R02B06`. This package accepts both compact names (`R2B6`) and zero-padded names
-(`R02B06`), then stores labels and metadata in the zero-padded form.
+bisections.
 
 ## Resource Expectations
 
