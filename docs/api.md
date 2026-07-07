@@ -180,14 +180,16 @@ Their result and option dataclasses are exported from the same submodules.
 
 ## Visualization
 
-Use the lightweight SVG helper for quick dependency-free grid previews:
+Use the lightweight SVG helper for quick dependency-free grid previews. The
+default projection is a map-style plot; use `projection="3d"` for static
+documentation figures:
 
 ```python
 from grid_generator import generate_grid
 from grid_generator.visualization import write_svg
 
 grid = generate_grid("R1B1", spring_iterations=20)
-write_svg(grid, "global_r1b1.svg")
+write_svg(grid, "global_r1b1.svg", projection="3d")
 ```
 
 ## Public API Inventory

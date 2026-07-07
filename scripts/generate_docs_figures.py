@@ -44,24 +44,28 @@ def _generate_grid(*args: object, **kwargs: object) -> Any:
     return generate_grid(*args, **kwargs)
 
 
+def _write_svg(grid: Any, path: Path) -> None:
+    write_svg(grid, path, projection="3d")
+
+
 def _global(output: Path) -> None:
     grid = _generate_grid("R1B1", spring_iterations=20)
-    write_svg(grid, output / "global_r1b1.svg")
+    _write_svg(grid, output / "global_r1b1.svg")
 
 
 def _global_netcdf(output: Path) -> None:
     grid = _generate_grid("R1B1", spring_iterations=20)
-    write_svg(grid, output / "global_r1b1_netcdf.svg")
+    _write_svg(grid, output / "global_r1b1_netcdf.svg")
 
 
 def _global_raw(output: Path) -> None:
     grid = _generate_grid("R1B1", optimize_global=False)
-    write_svg(grid, output / "global_r1b1_raw.svg")
+    _write_svg(grid, output / "global_r1b1_raw.svg")
 
 
 def _planar_torus(output: Path) -> None:
     grid = _generate_grid(TorusGridSpec(nx=12, ny=6, edge_length=1_000.0))
-    write_svg(grid, output / "planar_torus.svg")
+    _write_svg(grid, output / "planar_torus.svg")
 
 
 def _open_planar(output: Path) -> None:
@@ -69,8 +73,8 @@ def _open_planar(output: Path) -> None:
     parallelogram = _generate_grid(
         ParallelogramGridSpec(nx=8, ny=5, edge_length=1_000.0, shear=0.25)
     )
-    write_svg(channel, output / "planar_channel.svg")
-    write_svg(parallelogram, output / "planar_parallelogram.svg")
+    _write_svg(channel, output / "planar_channel.svg")
+    _write_svg(parallelogram, output / "planar_parallelogram.svg")
 
 
 def _advanced_planar(output: Path) -> None:
@@ -80,8 +84,8 @@ def _advanced_planar(output: Path) -> None:
     ragged = _generate_grid(
         RaggedOrthogonalGridSpec(nx=8, ny=5, dx=1_000.0, dy=800.0)
     )
-    write_svg(stretched, output / "planar_stretched_torus.svg")
-    write_svg(ragged, output / "planar_ragged_orthogonal.svg")
+    _write_svg(stretched, output / "planar_stretched_torus.svg")
+    _write_svg(ragged, output / "planar_ragged_orthogonal.svg")
 
 
 def _limited_area(output: Path) -> None:
@@ -96,13 +100,13 @@ def _limited_area(output: Path) -> None:
         boundary_depth=1,
     )
     grid = _generate_grid(spec, spring_iterations=20)
-    write_svg(grid, output / "limited_area.svg")
+    _write_svg(grid, output / "limited_area.svg")
 
 
 def _cut_circle(output: Path) -> None:
     parent = _generate_grid("R2B1", spring_iterations=20)
     cut = cut_grid(parent, Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0))
-    write_svg(cut, output / "cut_circle.svg")
+    _write_svg(cut, output / "cut_circle.svg")
 
 
 def _cut_multi_region(output: Path) -> None:
@@ -124,14 +128,14 @@ def _cut_multi_region(output: Path) -> None:
             name="CUT_MULTI",
         ),
     )
-    write_svg(cut, output / "cut_multi_region.svg")
+    _write_svg(cut, output / "cut_multi_region.svg")
 
 
 def _optimized_channel(output: Path) -> None:
     grid = _generate_grid(ChannelGridSpec(nx=8, ny=5, edge_length=1_000.0))
     assert check_grid(grid).ok
     optimized = optimize_grid(grid, OptimizationOptions(iterations=2, relaxation=0.1))
-    write_svg(optimized, output / "optimized_channel.svg")
+    _write_svg(optimized, output / "optimized_channel.svg")
 
 
 BUILDERS: tuple[FigureBuilder, ...] = (

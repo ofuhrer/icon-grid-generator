@@ -1,7 +1,7 @@
 # Examples
 
 The examples below are complete snippets. They use small grids so they are fast
-to copy, paste, and run. Each grid-producing example writes an SVG edge plot
+to copy, paste, and run. Each grid-producing example writes a 3D SVG grid plot
 with `grid_generator.visualization.write_svg`, and the checked-in figures below
 are generated from the same code path.
 
@@ -34,7 +34,7 @@ output.mkdir(exist_ok=True)
 grid = generate_grid("R1B1", spring_iterations=20)
 print(grid.name)
 print(grid.dims)
-write_svg(grid, output / "global_r1b1.svg")
+write_svg(grid, output / "global_r1b1.svg", projection="3d")
 ```
 
 ![Optimized global R1B1 grid](assets/examples/global_r1b1.svg)
@@ -57,7 +57,7 @@ output = Path("grid_examples")
 output.mkdir(exist_ok=True)
 
 grid = generate_grid("R1B1", spring_iterations=20)
-write_svg(grid, output / "global_r1b1_netcdf.svg")
+write_svg(grid, output / "global_r1b1_netcdf.svg", projection="3d")
 grid.to_netcdf(output / "icon_grid_R01B01.nc")
 ```
 
@@ -79,7 +79,7 @@ output.mkdir(exist_ok=True)
 
 raw_grid = generate_grid("R1B1", optimize_global=False)
 print(raw_grid.metadata["global_optimization"])
-write_svg(raw_grid, output / "global_r1b1_raw.svg")
+write_svg(raw_grid, output / "global_r1b1_raw.svg", projection="3d")
 ```
 
 ![Raw global R1B1 diagnostic grid](assets/examples/global_r1b1_raw.svg)
@@ -100,7 +100,7 @@ output.mkdir(exist_ok=True)
 grid = generate_grid(TorusGridSpec(nx=12, ny=6, edge_length=1_000.0))
 print(grid.name)
 print(grid.metadata["domain_length"])
-write_svg(grid, output / "planar_torus.svg")
+write_svg(grid, output / "planar_torus.svg", projection="3d")
 ```
 
 ![Planar torus grid](assets/examples/planar_torus.svg)
@@ -123,8 +123,8 @@ channel = generate_grid(ChannelGridSpec(nx=8, ny=5, edge_length=1_000.0))
 parallelogram = generate_grid(
     ParallelogramGridSpec(nx=8, ny=5, edge_length=1_000.0, shear=0.25)
 )
-write_svg(channel, output / "planar_channel.svg")
-write_svg(parallelogram, output / "planar_parallelogram.svg")
+write_svg(channel, output / "planar_channel.svg", projection="3d")
+write_svg(parallelogram, output / "planar_parallelogram.svg", projection="3d")
 ```
 
 ![Open planar channel grid](assets/examples/planar_channel.svg)
@@ -149,8 +149,8 @@ stretched = generate_grid(
     StretchedTorusGridSpec(nx=8, ny=5, edge_length=1_000.0, stretch_x=1.4)
 )
 ragged = generate_grid(RaggedOrthogonalGridSpec(nx=8, ny=5, dx=1_000.0, dy=800.0))
-write_svg(stretched, output / "planar_stretched_torus.svg")
-write_svg(ragged, output / "planar_ragged_orthogonal.svg")
+write_svg(stretched, output / "planar_stretched_torus.svg", projection="3d")
+write_svg(ragged, output / "planar_ragged_orthogonal.svg", projection="3d")
 ```
 
 ![Stretched torus grid](assets/examples/planar_stretched_torus.svg)
@@ -179,7 +179,7 @@ spec = LimitedAreaGridSpec(
 grid = generate_grid(spec, spring_iterations=20)
 print(grid.name)
 print(grid.dims)
-write_svg(grid, output / "limited_area.svg")
+write_svg(grid, output / "limited_area.svg", projection="3d")
 ```
 
 ![Limited-area grid](assets/examples/limited_area.svg)
@@ -201,7 +201,7 @@ output.mkdir(exist_ok=True)
 parent = generate_grid("R2B1", spring_iterations=20)
 cut = cut_grid(parent, Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0))
 print(cut.dims)
-write_svg(cut, output / "cut_circle.svg")
+write_svg(cut, output / "cut_circle.svg", projection="3d")
 ```
 
 ![Circle cut grid](assets/examples/cut_circle.svg)
@@ -231,7 +231,7 @@ cut = cut_grid(
         name="CUT_MULTI",
     ),
 )
-write_svg(cut, output / "cut_multi_region.svg")
+write_svg(cut, output / "cut_multi_region.svg", projection="3d")
 ```
 
 ![Multi-region cut grid](assets/examples/cut_multi_region.svg)
@@ -259,7 +259,7 @@ optimized = optimize_grid(grid, OptimizationOptions(iterations=2, relaxation=0.1
 
 assert check.ok
 print(stats.cells, stats.boundary_edges)
-write_svg(optimized, output / "optimized_channel.svg")
+write_svg(optimized, output / "optimized_channel.svg", projection="3d")
 ```
 
 ![Optimized channel grid](assets/examples/optimized_channel.svg)

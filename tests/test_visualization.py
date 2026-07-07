@@ -51,6 +51,28 @@ def test_write_svg_creates_edge_plot_for_cut_grid(tmp_path):
     assert text.count("<line ") > 0
 
 
+def test_write_svg_creates_3d_projection(tmp_path):
+    grid = generate_grid("R01B01", spring_iterations=5)
+
+    path = write_svg(grid, tmp_path / "global_3d.svg", projection="3d")
+    text = path.read_text()
+
+    assert "<circle " in text
+    assert 'stroke-opacity="' in text
+    assert text.count("<line ") > 0
+
+
+def test_write_svg_creates_3d_planar_projection(tmp_path):
+    grid = generate_grid(ChannelGridSpec(nx=4, ny=3, edge_length=1.0))
+
+    path = write_svg(grid, tmp_path / "planar_3d.svg", projection="3d")
+    text = path.read_text()
+
+    assert "<ellipse " in text
+    assert 'stroke-opacity="' in text
+    assert text.count("<line ") > 0
+
+
 def test_write_svg_rejects_invalid_render_options(tmp_path):
     grid = generate_grid("R01B00")
 
@@ -58,3 +80,5 @@ def test_write_svg_rejects_invalid_render_options(tmp_path):
         write_svg(grid, tmp_path / "bad.svg", width=0)
     with pytest.raises(ValueError, match="max_edges"):
         write_svg(grid, tmp_path / "bad.svg", max_edges=0)
+    with pytest.raises(ValueError, match="projection"):
+        write_svg(grid, tmp_path / "bad.svg", projection="globe")
