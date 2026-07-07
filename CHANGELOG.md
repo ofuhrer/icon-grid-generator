@@ -2,14 +2,22 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-07
+
 - Keep the root import surface focused while moving advanced cutting helpers to
   `grid_generator.cutting`.
 - Allow common `generate_grid()` options to be passed directly as keyword
   arguments.
+- Add lightweight SVG grid visualization via `grid_generator.visualization`.
+- Expand copy-pasteable examples for global, raw, planar, limited-area,
+  cutting, diagnostics, transforms, NetCDF export, and visualization workflows.
 - Clarify and test `optimize_global` behavior across global, limited-area, and
   planar grid specs.
 - Preserve planar geometry when optimizing or diffusing cut grids from planar
   parents.
+- Add fast mathematical correctness matrix coverage across all supported grid
+  families, region predicates, cut modes, transforms, metric scaling, and
+  representative NetCDF exports.
 - Add example scripts, type-marker packaging, and documentation updates for the
   refactored public API.
 
