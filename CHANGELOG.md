@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-07
+
+- Display generated SVG grid figures directly in the documentation examples.
+- Add checked documentation figure generation with CI and release-time freshness
+  checks.
+- Publish GitHub Releases automatically from the release workflow.
+
 ## 0.3.0 - 2026-07-07
 
 - Keep the root import surface focused while moving advanced cutting helpers to
