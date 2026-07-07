@@ -230,18 +230,7 @@ def _equivalent_svg(generated: Path, committed: Path) -> tuple[bool, str]:
             f"committed={len(committed_lines)}",
         )
 
-    max_delta = 0.0
-    max_location = (0, 0)
-    for line_index, (generated_line, committed_line) in enumerate(
-        zip(generated_lines, committed_lines, strict=True)
-    ):
-        for coordinate_index, (generated_value, committed_value) in enumerate(
-            zip(generated_line, committed_line, strict=True)
-        ):
-            delta = abs(generated_value - committed_value)
-            if delta > max_delta:
-                max_delta = delta
-                max_location = (line_index, coordinate_index)
+    max_delta, max_location = _max_line_set_delta(generated_lines, committed_lines)
 
     if math.isclose(max_delta, 0.0, abs_tol=SVG_COORDINATE_TOLERANCE):
         return True, "semantic match"
@@ -249,10 +238,37 @@ def _equivalent_svg(generated: Path, committed: Path) -> tuple[bool, str]:
         False,
         (
             f"max coordinate delta {max_delta:.3f}px at line "
-            f"{max_location[0]} coordinate {max_location[1]} "
+            f"{max_location[0]} matched line {max_location[1]} "
             f"(tolerance {SVG_COORDINATE_TOLERANCE:.3f}px)"
         )
     )
+
+
+def _max_line_set_delta(
+    generated_lines: list[tuple[float, float, float, float]],
+    committed_lines: list[tuple[float, float, float, float]],
+) -> tuple[float, tuple[int, int]]:
+    unmatched = list(committed_lines)
+    max_delta = 0.0
+    max_location = (0, 0)
+    for generated_index, generated_line in enumerate(generated_lines):
+        best_index = 0
+        best_delta = math.inf
+        for committed_index, committed_line in enumerate(unmatched):
+            delta = max(
+                abs(generated_value - committed_value)
+                for generated_value, committed_value in zip(
+                    generated_line, committed_line, strict=True
+                )
+            )
+            if delta < best_delta:
+                best_index = committed_index
+                best_delta = delta
+        unmatched.pop(best_index)
+        if best_delta > max_delta:
+            max_delta = best_delta
+            max_location = (generated_index, best_index)
+    return max_delta, max_location
 
 
 def _svg_static_signature(
