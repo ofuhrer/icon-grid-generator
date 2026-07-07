@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-07-07
+
+- Restore documentation grid figures to the stable 2D SVG edge-plot style.
+- Remove the transient 3D visualization option from `write_svg()`.
+
 ## 0.3.1 - 2026-07-07
 
 - Display generated SVG grid figures directly in the documentation examples.
