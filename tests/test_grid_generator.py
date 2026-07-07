@@ -281,6 +281,18 @@ def geometric_dual_areas_from_cell_centers(grid, sphere_radius):
     return dual_areas
 
 
+def edge_quadrilateral_dual_areas(grid):
+    dual_areas = np.zeros(grid.dims["vertex"], dtype=np.float64)
+    for vertex_index, edge_row in enumerate(grid.icon_connectivity["v2e"]):
+        edge_indices = edge_row[edge_row > 0] - 1
+        dual_areas[vertex_index] = np.sum(
+            0.25
+            * grid.geometry["edge_length"][edge_indices]
+            * grid.geometry["dual_edge_length"][edge_indices]
+        )
+    return dual_areas
+
+
 
 
 
@@ -861,7 +873,8 @@ def test_spherical_manifold_degree_structure_and_area_conservation_across_resolu
     assert np.count_nonzero(vertex_degrees == 6) == grid.dims["vertex"] - 12
     assert set(np.unique(vertex_degrees)) <= {5, 6}
     assert np.allclose(cell_area.sum(), 4.0 * math.pi * sphere_radius**2, rtol=2.0e-14)
-    assert np.allclose(dual_area.sum(), cell_area.sum(), rtol=2.0e-14)
+    assert np.allclose(dual_area, edge_quadrilateral_dual_areas(grid))
+    assert abs(dual_area.sum() - cell_area.sum()) / cell_area.sum() < 0.04
     assert np.max(cell_area) / np.min(cell_area) < 1.35
     assert np.max(dual_area) / np.min(dual_area) < 1.7
     assert np.max(grid.geometry["edge_length"]) / np.min(grid.geometry["edge_length"]) < 1.25
@@ -875,7 +888,7 @@ def test_r01b00_is_exact_regular_icosahedron_grid():
     expected_edge_angle = math.acos(1.0 / math.sqrt(5.0))
     expected_edge_length = sphere_radius * expected_edge_angle
     expected_cell_area = 4.0 * math.pi * sphere_radius**2 / 20.0
-    expected_dual_area = 4.0 * math.pi * sphere_radius**2 / 12.0
+    expected_dual_area = edge_quadrilateral_dual_areas(grid)[0]
 
     assert np.allclose(grid.geometry["edge_length"], expected_edge_length)
     assert np.allclose(grid.geometry["cell_area"], expected_cell_area)
@@ -1053,7 +1066,7 @@ def test_geometry_metric_fields_are_positive_scaled_and_conservative():
     assert np.all(geometry["dual_edge_length"] > 0.0)
     assert np.all(geometry["edge_cell_distance"] > 0.0)
     assert np.allclose(geometry["cell_area"].sum(), 4.0 * math.pi * sphere_radius**2)
-    assert np.allclose(geometry["dual_area"].sum(), geometry["cell_area"].sum())
+    assert np.allclose(geometry["dual_area"], edge_quadrilateral_dual_areas(grid))
     assert np.allclose(geometry["edge_vert_distance"][:, 0], geometry["edge_length"] * 0.5)
     assert np.allclose(geometry["edge_vert_distance"][:, 1], geometry["edge_length"] * 0.5)
     assert np.allclose(
@@ -1082,13 +1095,15 @@ def test_geometry_metric_fields_are_positive_scaled_and_conservative():
     )
 
 
-def test_dual_areas_are_geometric_dual_cell_areas():
+def test_dual_areas_are_incident_edge_quadrilateral_areas():
     sphere_radius = 3.0
     grid = generate_grid("R02B02", options={"sphere_radius": sphere_radius})
-    expected_dual_area = geometric_dual_areas_from_cell_centers(grid, sphere_radius)
+    expected_dual_area = edge_quadrilateral_dual_areas(grid)
 
     assert np.allclose(grid.geometry["dual_area"], expected_dual_area)
-    assert np.allclose(grid.geometry["dual_area"].sum(), grid.geometry["cell_area"].sum())
+    assert abs(grid.geometry["dual_area"].sum() - grid.geometry["cell_area"].sum()) / grid.geometry[
+        "cell_area"
+    ].sum() < 0.001
 
 
 def test_edge_vectors_are_tangent_and_match_local_zonal_meridional_components():
@@ -1262,7 +1277,7 @@ def test_metric_fields_match_independent_spherical_recomputation():
         )
     ) * sphere_radius
     expected_cell_areas = spherical_triangle_areas_lhuilier(grid.vertices, grid.cells, sphere_radius)
-    expected_dual_area = geometric_dual_areas_from_cell_centers(grid, sphere_radius)
+    expected_dual_area = edge_quadrilateral_dual_areas(grid)
 
     assert np.allclose(grid.geometry["cell_area"], expected_cell_areas)
     assert np.allclose(grid.geometry["edge_length"], expected_edge_lengths)
@@ -1440,7 +1455,8 @@ def test_representative_grid_series_sanity(grid_name):
     assert np.count_nonzero(vertex_degrees == 6) == grid.dims["vertex"] - 12
     assert set(np.unique(vertex_degrees)) <= {5, 6}
     assert np.allclose(cell_area.sum(), 4.0 * math.pi * sphere_radius**2, rtol=5.0e-13)
-    assert np.allclose(dual_area.sum(), cell_area.sum(), rtol=5.0e-15)
+    assert np.allclose(dual_area, edge_quadrilateral_dual_areas(grid))
+    assert abs(dual_area.sum() - cell_area.sum()) / cell_area.sum() < 0.04
     assert np.allclose(
         np.max(center_vertex_cosines, axis=1),
         np.min(center_vertex_cosines, axis=1),

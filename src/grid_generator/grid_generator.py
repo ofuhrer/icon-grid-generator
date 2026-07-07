@@ -2048,13 +2048,11 @@ def _geometry_fields(
     )
     return {
         "cell_area": cell_areas,
-        "dual_area": _dual_areas(
+        "dual_area": _dual_areas_from_edges(
             vertices.shape[0],
-            cells,
-            cell_areas,
-            cell_center_xyz,
-            icon_connectivity["v2c"],
-            sphere_radius,
+            icon_connectivity["v2e"],
+            edge_lengths,
+            dual_edge_lengths,
         ),
         "edge_length": edge_lengths,
         "dual_edge_length": dual_edge_lengths,
@@ -2699,6 +2697,23 @@ def _dual_areas(
     dual = np.zeros(n_vertices, dtype=np.float64)
     for cell_index, cell in enumerate(cells):
         dual[cell] += cell_areas[cell_index] / 3.0
+    return dual
+
+
+def _dual_areas_from_edges(
+    n_vertices: int,
+    edges_of_vertex: np.ndarray,
+    edge_lengths: np.ndarray,
+    dual_edge_lengths: np.ndarray,
+) -> np.ndarray:
+    dual = np.zeros(n_vertices, dtype=np.float64)
+    for vertex in range(n_vertices):
+        edge_indices = edges_of_vertex[vertex]
+        active = edge_indices[edge_indices > 0] - 1
+        if active.size:
+            dual[vertex] = float(
+                np.sum(0.25 * edge_lengths[active] * dual_edge_lengths[active])
+            )
     return dual
 
 

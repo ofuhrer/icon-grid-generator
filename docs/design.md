@@ -44,12 +44,35 @@ deterministic pipeline:
 - Global grid generation uses staged spring relaxation by default; raw
   bisection remains available with `optimize_global=False` for diagnostics and
   topology checks.
+- Planar triangular variants share one builder pipeline. The spec object
+  carries variant flags such as `periodic` and `periodic_x`; `_planar.py`
+  dispatches geometry, topology, and metric behavior from those flags instead
+  of adding separate public generation entry points.
+- Limited-area and cut grids are compacted views of an `IconGrid` selected by
+  region predicates plus optional boundary expansion. They deliberately reuse
+  the open-mesh topology, metrics, and refinement reconstruction path so
+  regional extraction does not fork the grid contract.
+- Geometry optimization and diffusion are post-generation transforms that
+  preserve topology and rebuild geometry-derived fields. Global spring
+  relaxation shares the same module but remains part of global generation when
+  `optimize_global=True`.
+- Spherical `dual_area` follows the ICON grid-file contract: each vertex area
+  is the sum of `0.25 * edge_length * dual_edge_length` over incident edges.
+  It is an edge-quadrilateral metric field and is not forced to sum exactly to
+  the spherical cell-area total.
 - Optional Numba acceleration is an implementation detail selected through
   `IconGridOptions.accelerator`; NumPy remains the required baseline.
 - UUIDs use deterministic UUIDv5 payloads derived from canonical specs and
   options. Any payload change is a compatibility change.
 - NetCDF export is an internal module boundary. Public users should call
   `IconGrid.to_netcdf(path)`.
+- Pipeline stage results use frozen dataclasses to keep builder boundaries
+  explicit. Arrays remain mutable NumPy buffers during construction; callers
+  should treat completed `IconGrid` objects as immutable values.
+- `grid_generator.py` owns public specs, validation-facing helpers, metadata,
+  UUID payloads, and the `generate_grid()` facade. Large implementation
+  concerns should stay in focused private modules rather than growing the
+  facade again.
 - Performance checks live behind `make perf-check` and are intentionally
   separate from default CI-style checks because runtime varies with local load.
 
@@ -140,3 +163,7 @@ NetCDF output should include tests for the relevant contract:
 
 Use the smallest grid that proves the behavior. Larger grids are useful only for
 representative sanity checks.
+
+Private helper tests may exercise defensive branches for coverage when the
+branch protects a public contract. These tests are regression guards, not
+scientific validation or additional public API.
