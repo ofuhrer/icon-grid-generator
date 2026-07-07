@@ -14,6 +14,8 @@ public API documented in `README.md` and `docs/api.md`.
   and writing boundary.
 - `src/grid_generator/_torus.py`, `_planar.py`, `_limited_area.py`: planar and
   regional variants.
+- `src/grid_generator/cutting.py`: public cutting import surface; implementation
+  remains in `grid_generator.py` and `_limited_area.py`.
 - `src/grid_generator/_diagnostics.py`, `_optimization.py`: optional utilities.
 - `tests/test_grid_generator.py`: global geometry/topology/refinement contract
   coverage.
@@ -51,6 +53,13 @@ public API documented in `README.md` and `docs/api.md`.
 
 - Preserve deterministic output for identical specs and options.
 - Validate public inputs before expensive generation.
+- Keep the root import surface small. Advanced helpers such as `CutGridSpec` and
+  `cut_grid` are exported from focused submodules, not from `grid_generator`.
+- `generate_grid()` accepts direct keyword option overrides. Keep mapping,
+  `IconGridOptions`, and keyword override semantics consistent.
+- Global grids are optimized by default. Limited-area grids pass that setting to
+  their generated global parent. Planar grids must reject explicit
+  `optimize_global=True` and auto-disable only when the option is absent.
 - Do not add runtime dependencies lightly; `numpy` is the core dependency.
 - Keep NetCDF variable names, shapes, and one-based exported indices stable
   unless the change is intentional and documented.

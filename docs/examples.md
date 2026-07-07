@@ -1,124 +1,237 @@
 # Examples
 
-## Write A Global Grid
+The examples below are complete snippets. They use small grids so they are fast
+to copy, paste, and run. Each grid-producing example writes an SVG edge plot
+with `grid_generator.visualization.write_svg`.
+
+## Output Directory
 
 ```python
-from grid_generator import generate_grid
+from pathlib import Path
 
-grid = generate_grid("R2B4")
-grid.to_netcdf("icon_grid_R02B04.nc")
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
 ```
 
-This is the default path for standard spherical grid files. Global grids are
+## Global Grid
+
+Use the string shorthand for standard spherical grids. Global grids are
 optimized by default.
 
-## Pick The Right Spec
-
-| Need | Use |
-| --- | --- |
-| Standard spherical grid | `generate_grid("R2B4")` |
-| Raw topology diagnostic | `generate_grid("R2B4", optimize_global=False)` |
-| Periodic planar grid | `TorusGridSpec(...)` |
-| Regional extract | `LimitedAreaGridSpec(...)` |
-| Cut an existing grid | `cut_grid(...)` from `grid_generator.cutting` |
-
-## Inspect An In-Memory Grid
-
 ```python
-from grid_generator import generate_grid
+from pathlib import Path
 
-grid = generate_grid("R2B3")
+from grid_generator import generate_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+grid = generate_grid("R1B1", spring_iterations=20)
 print(grid.name)
 print(grid.dims)
-print(grid.metadata["mean_edge_length"])
-print(grid.geometry["cell_area"].shape)
+write_svg(grid, output / "global_r1b1.svg")
 ```
 
-## Disable The Safety Limit
-
-`generate_grid()` has a safety limit to avoid accidental large allocations. Set
-`max_cells=None` when a large grid is intentional.
-
-```python
-from grid_generator import generate_grid
-
-grid = generate_grid("R2B4", max_cells=None)
-print(grid.dims)
-```
-
-## Generate A Raw Diagnostic Grid
-
-Global grids are optimized by default. Raw grids are useful for topology tests
-and diagnostics.
-
-```python
-from grid_generator import generate_grid
-
-raw_grid = generate_grid("R2B4", optimize_global=False)
-print(raw_grid.metadata["global_optimization"])
-```
-
-## Planar Torus
-
-```python
-from grid_generator import TorusGridSpec, generate_grid
-
-grid = generate_grid(TorusGridSpec(nx=32, ny=16, edge_length=1_000.0))
-print(grid.metadata["grid_geometry"])
-print(grid.metadata["domain_length"])
-```
-
-## Limited Area
-
-```python
-from grid_generator import LimitedAreaGridSpec, Region, generate_grid
-
-spec = LimitedAreaGridSpec(
-    parent="R02B03",
-    region=Region.lonlat_box(lon_min=-20.0, lon_max=20.0, lat_min=35.0, lat_max=60.0),
-    boundary_depth=2,
-)
-grid = generate_grid(spec, max_cells=None)
-print(grid.dims)
-```
-
-## Cut An Existing Grid
-
-For one region, pass the region directly:
-
-```python
-from grid_generator import Region, generate_grid
-from grid_generator.cutting import cut_grid
-
-parent = generate_grid("R2B4")
-cut = cut_grid(parent, Region.circle(lon=8.0, lat=47.0, radius_degrees=10.0))
-print(cut.dims)
-```
-
-Use `CutGridSpec` when you need multiple regions or non-default cut options:
-
-```python
-from grid_generator import Region, generate_grid
-from grid_generator.cutting import CutGridSpec, cut_grid
-
-parent = generate_grid("R2B4")
-cut = cut_grid(
-    parent,
-    CutGridSpec(regions=Region.circle(lon=8.0, lat=47.0, radius_degrees=10.0)),
-)
-print(cut.dims)
-```
-
-## Runnable Scripts
-
-The `examples/` directory contains short scripts for the main user workflows:
-
-- `examples/write_global_grid.py`
-- `examples/write_limited_area.py`
-- `examples/planar_torus.py`
+## NetCDF Export
 
 NetCDF export requires installing the optional extra:
 
 ```bash
 python -m pip install "icon-grid-generator[netcdf]"
+```
+
+```python
+from pathlib import Path
+
+from grid_generator import generate_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+grid = generate_grid("R1B1", spring_iterations=20)
+write_svg(grid, output / "global_r1b1_netcdf.svg")
+grid.to_netcdf(output / "icon_grid_R01B01.nc")
+```
+
+## Raw Diagnostic Grid
+
+Raw grids skip global optimization. Use this for topology checks, not for normal
+grid-file generation.
+
+```python
+from pathlib import Path
+
+from grid_generator import generate_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+raw_grid = generate_grid("R1B1", optimize_global=False)
+print(raw_grid.metadata["global_optimization"])
+write_svg(raw_grid, output / "global_r1b1_raw.svg")
+```
+
+## Planar Torus
+
+`TorusGridSpec` creates a doubly periodic planar triangular grid.
+
+```python
+from pathlib import Path
+
+from grid_generator import TorusGridSpec, generate_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+grid = generate_grid(TorusGridSpec(nx=12, ny=6, edge_length=1_000.0))
+print(grid.name)
+print(grid.metadata["domain_length"])
+write_svg(grid, output / "planar_torus.svg")
+```
+
+## Open Planar Grids
+
+`ChannelGridSpec` and `ParallelogramGridSpec` are useful for local planar
+experiments with open boundaries.
+
+```python
+from pathlib import Path
+
+from grid_generator import ChannelGridSpec, ParallelogramGridSpec, generate_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+channel = generate_grid(ChannelGridSpec(nx=8, ny=5, edge_length=1_000.0))
+parallelogram = generate_grid(
+    ParallelogramGridSpec(nx=8, ny=5, edge_length=1_000.0, shear=0.25)
+)
+write_svg(channel, output / "planar_channel.svg")
+write_svg(parallelogram, output / "planar_parallelogram.svg")
+```
+
+## Advanced Planar Variants
+
+Advanced but supported planar variants live in `grid_generator.planar`.
+
+```python
+from pathlib import Path
+
+from grid_generator import generate_grid
+from grid_generator.planar import RaggedOrthogonalGridSpec, StretchedTorusGridSpec
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+stretched = generate_grid(
+    StretchedTorusGridSpec(nx=8, ny=5, edge_length=1_000.0, stretch_x=1.4)
+)
+ragged = generate_grid(RaggedOrthogonalGridSpec(nx=8, ny=5, dx=1_000.0, dy=800.0))
+write_svg(stretched, output / "planar_stretched_torus.svg")
+write_svg(ragged, output / "planar_ragged_orthogonal.svg")
+```
+
+## Limited Area
+
+`LimitedAreaGridSpec` extracts a compact regional grid from a generated global
+parent.
+
+```python
+from pathlib import Path
+
+from grid_generator import LimitedAreaGridSpec, Region, generate_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+spec = LimitedAreaGridSpec(
+    parent="R2B1",
+    region=Region.lonlat_box(lon_min=-30.0, lon_max=30.0, lat_min=-20.0, lat_max=35.0),
+    boundary_depth=1,
+)
+grid = generate_grid(spec, spring_iterations=20)
+print(grid.name)
+print(grid.dims)
+write_svg(grid, output / "limited_area.svg")
+```
+
+## Cut An Existing Grid
+
+For a single-region cut, pass the region directly.
+
+```python
+from pathlib import Path
+
+from grid_generator import Region, generate_grid
+from grid_generator.cutting import cut_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+parent = generate_grid("R2B1", spring_iterations=20)
+cut = cut_grid(parent, Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0))
+print(cut.dims)
+write_svg(cut, output / "cut_circle.svg")
+```
+
+Use `CutGridSpec` for multiple regions or non-default cut options.
+
+```python
+from pathlib import Path
+
+from grid_generator import Region, generate_grid
+from grid_generator.cutting import CutGridSpec, cut_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+parent = generate_grid("R2B1", spring_iterations=20)
+cut = cut_grid(
+    parent,
+    CutGridSpec(
+        regions=(
+            Region.circle(lon=0.0, lat=0.0, radius_degrees=35.0),
+            Region.lonlat_box(lon_min=-20.0, lon_max=20.0, lat_min=-15.0, lat_max=15.0),
+        ),
+        boundary_depth=1,
+        smoothing_depth=1,
+        name="CUT_MULTI",
+    ),
+)
+write_svg(cut, output / "cut_multi_region.svg")
+```
+
+## Diagnostics And Transforms
+
+Diagnostics inspect a grid without changing it. Transforms return a new grid
+with unchanged topology.
+
+```python
+from pathlib import Path
+
+from grid_generator import ChannelGridSpec, generate_grid
+from grid_generator.diagnostics import check_grid, grid_statistics
+from grid_generator.transforms import OptimizationOptions, optimize_grid
+from grid_generator.visualization import write_svg
+
+output = Path("grid_examples")
+output.mkdir(exist_ok=True)
+
+grid = generate_grid(ChannelGridSpec(nx=8, ny=5, edge_length=1_000.0))
+check = check_grid(grid)
+stats = grid_statistics(grid)
+optimized = optimize_grid(grid, OptimizationOptions(iterations=2, relaxation=0.1))
+
+assert check.ok
+print(stats.cells, stats.boundary_edges)
+write_svg(optimized, output / "optimized_channel.svg")
 ```

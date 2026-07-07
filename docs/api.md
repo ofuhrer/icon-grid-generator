@@ -178,6 +178,18 @@ from grid_generator.transforms import diffuse_grid, optimize_grid
 
 Their result and option dataclasses are exported from the same submodules.
 
+## Visualization
+
+Use the lightweight SVG helper for quick dependency-free grid previews:
+
+```python
+from grid_generator import generate_grid
+from grid_generator.visualization import write_svg
+
+grid = generate_grid("R1B1", spring_iterations=20)
+write_svg(grid, "global_r1b1.svg")
+```
+
 ## Public API Inventory
 
 Every name exported from `grid_generator.__all__` should appear here so public

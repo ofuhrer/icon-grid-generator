@@ -148,12 +148,29 @@ def test_markdown_python_examples_execute(tmp_path, monkeypatch):
             code = match.group(1)
             exec(compile(code, str(markdown_file), "exec"), namespace)
 
+    svg_files = sorted(tmp_path.rglob("*.svg"))
+    assert svg_files
+    for svg_file in svg_files:
+        text = svg_file.read_text()
+        assert text.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+        assert "<svg " in text
+        assert "<line " in text
+
 
 def test_example_scripts_execute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     for example in sorted((PROJECT_ROOT / "examples").glob("*.py")):
         runpy.run_path(str(example), run_name="__main__")
+
+    svg_files = sorted(tmp_path.glob("*.svg"))
+    assert {path.name for path in svg_files} == {
+        "icon_grid_R02B04.svg",
+        "icon_grid_limited_area.svg",
+        "planar_torus.svg",
+    }
+    for svg_file in svg_files:
+        assert "<line " in svg_file.read_text()
 
 
 def test_public_api_inventory_matches_documented_exports():
