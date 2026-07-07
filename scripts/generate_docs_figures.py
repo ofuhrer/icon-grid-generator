@@ -278,15 +278,19 @@ def _svg_lines(root: ElementTree.Element) -> list[tuple[float, float, float, flo
     for element in root.iter():
         if element.tag.rsplit("}", maxsplit=1)[-1] != "line":
             continue
-        lines.append(
-            (
-                float(element.attrib["x1"]),
-                float(element.attrib["y1"]),
-                float(element.attrib["x2"]),
-                float(element.attrib["y2"]),
-            )
-        )
-    return lines
+        endpoint_a = (float(element.attrib["x1"]), float(element.attrib["y1"]))
+        endpoint_b = (float(element.attrib["x2"]), float(element.attrib["y2"]))
+        start, end = sorted((endpoint_a, endpoint_b))
+        lines.append((*start, *end))
+    return sorted(
+        lines,
+        key=lambda line: (
+            round(line[0], 3),
+            round(line[1], 3),
+            round(line[2], 3),
+            round(line[3], 3),
+        ),
+    )
 
 
 if __name__ == "__main__":
