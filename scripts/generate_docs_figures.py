@@ -185,51 +185,72 @@ def _check(generated: Path, committed: Path) -> int:
             print(f"stale extra docs figures: {', '.join(extra)}", file=sys.stderr)
         return 1
 
-    changed = [
-        name
-        for name in sorted(generated_files)
-        if not _svg_files_match(generated / name, committed / name)
-    ]
+    changed: list[tuple[str, str]] = []
+    for name in sorted(generated_files):
+        matches, reason = _svg_files_match(generated / name, committed / name)
+        if not matches:
+            changed.append((name, reason))
+
     if changed:
         print(
             "stale docs figures: "
-            + ", ".join(changed)
+            + ", ".join(name for name, _reason in changed)
             + "\nrun `make docs-figures` and commit the result",
             file=sys.stderr,
         )
+        for name, reason in changed:
+            print(f"  {name}: {reason}", file=sys.stderr)
         return 1
     print(f"{len(generated_files)} docs figures are current")
     return 0
 
 
-def _svg_files_match(generated: Path, committed: Path) -> bool:
+def _svg_files_match(generated: Path, committed: Path) -> tuple[bool, str]:
     if filecmp.cmp(generated, committed, shallow=False):
-        return True
+        return True, "exact match"
     return _equivalent_svg(generated, committed)
 
 
-def _equivalent_svg(generated: Path, committed: Path) -> bool:
+def _equivalent_svg(generated: Path, committed: Path) -> tuple[bool, str]:
     try:
         generated_root = ElementTree.parse(generated).getroot()
         committed_root = ElementTree.parse(committed).getroot()
-    except ElementTree.ParseError:
-        return False
+    except ElementTree.ParseError as error:
+        return False, f"invalid SVG XML: {error}"
 
     if _svg_static_signature(generated_root) != _svg_static_signature(committed_root):
-        return False
+        return False, "non-line SVG structure differs"
 
     generated_lines = _svg_lines(generated_root)
     committed_lines = _svg_lines(committed_root)
     if len(generated_lines) != len(committed_lines):
-        return False
-
-    return all(
-        math.isclose(generated_value, committed_value, abs_tol=SVG_COORDINATE_TOLERANCE)
-        for generated_line, committed_line in zip(
-            generated_lines, committed_lines, strict=True
+        return (
+            False,
+            f"line count differs: generated={len(generated_lines)}, "
+            f"committed={len(committed_lines)}",
         )
-        for generated_value, committed_value in zip(
-            generated_line, committed_line, strict=True
+
+    max_delta = 0.0
+    max_location = (0, 0)
+    for line_index, (generated_line, committed_line) in enumerate(
+        zip(generated_lines, committed_lines, strict=True)
+    ):
+        for coordinate_index, (generated_value, committed_value) in enumerate(
+            zip(generated_line, committed_line, strict=True)
+        ):
+            delta = abs(generated_value - committed_value)
+            if delta > max_delta:
+                max_delta = delta
+                max_location = (line_index, coordinate_index)
+
+    if math.isclose(max_delta, 0.0, abs_tol=SVG_COORDINATE_TOLERANCE):
+        return True, "semantic match"
+    return (
+        False,
+        (
+            f"max coordinate delta {max_delta:.3f}px at line "
+            f"{max_location[0]} coordinate {max_location[1]} "
+            f"(tolerance {SVG_COORDINATE_TOLERANCE:.3f}px)"
         )
     )
 
