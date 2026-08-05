@@ -14,7 +14,11 @@ from ._types import GeometryData, MetricsData, RefinementData, TopologyData
 class LimitedAreaExtractor:
     """Extract a compact limited-area grid from a generated global parent."""
 
-    def build(self, spec: Any, options: Any) -> tuple[GeometryData, TopologyData, MetricsData, RefinementData]:
+    def build(
+        self,
+        spec: Any,
+        options: Any,
+    ) -> tuple[GeometryData, TopologyData, MetricsData, RefinementData, Any]:
         from . import grid_generator as gg
 
         parent = gg.generate_grid(spec.parent_grid_name, options=options)
@@ -25,9 +29,9 @@ class LimitedAreaExtractor:
         ordered_parent_cells = _order_cells_by_boundary(parent, selected)
         geometry = _compact_geometry(parent, ordered_parent_cells)
         topology = _open_topology(parent, geometry, ordered_parent_cells, options)
-        metrics = _limited_metrics(parent, geometry, topology, options.sphere_radius)
+        metrics = _limited_metrics(parent, geometry, topology)
         refinement = _limited_refinement(parent, geometry, topology, ordered_parent_cells)
-        return geometry, topology, metrics, refinement
+        return geometry, topology, metrics, refinement, parent
 
 
 def cut_existing_grid(parent: Any, spec: Any) -> tuple[GeometryData, TopologyData, MetricsData, RefinementData]:
@@ -41,7 +45,7 @@ def cut_existing_grid(parent: Any, spec: Any) -> tuple[GeometryData, TopologyDat
     ordered_parent_cells = _order_cells_by_boundary(parent, selected)
     geometry = _compact_geometry(parent, ordered_parent_cells)
     topology = _open_topology(parent, geometry, ordered_parent_cells, parent.options)
-    metrics = _limited_metrics(parent, geometry, topology, parent.options.sphere_radius)
+    metrics = _limited_metrics(parent, geometry, topology)
     refinement = _limited_refinement(parent, geometry, topology, ordered_parent_cells)
     refinement.fields["smooth_c_ctrl"] = np.full(
         geometry.cells.shape[0],
@@ -371,33 +375,63 @@ def _open_neighbor_tables(
     }
 
 
-def _limited_metrics(parent: Any, geometry: GeometryData, topology: TopologyData, sphere_radius: float) -> MetricsData:
+def _limited_metrics(
+    parent: Any,
+    geometry: GeometryData,
+    topology: TopologyData,
+) -> MetricsData:
     from . import grid_generator as gg
 
     source_edges = topology.source_edge_index
     edge_lengths = parent.geometry["edge_length"][source_edges]
-    dual_edge_lengths = parent.geometry["dual_edge_length"][source_edges].copy()
+    dual_edge_lengths = parent.geometry["dual_edge_length"][source_edges]
     edge_cell_distance = np.empty((topology.edges.shape[0], 2), dtype=np.float64)
     for edge_index, adjacent in enumerate(topology.edge_cells):
+        source_edge = int(source_edges[edge_index])
+        parent_adjacent = parent.edge_cells[source_edge]
+        used_parent_sides: set[int] = set()
         for side in range(2):
             if adjacent[side] >= 0:
-                center = geometry.cell_center_xyz[adjacent[side]][np.newaxis, :]
-                edge_center = topology.edge_center_xyz[edge_index][np.newaxis, :]
-                edge_cell_distance[edge_index, side] = gg._edge_cell_distances(
-                    center,
-                    np.array([[0, 0]], dtype=np.int32),
-                    edge_center,
-                    sphere_radius,
-                )[0, 0]
+                source_cell = int(geometry.source_cell_index[adjacent[side]])
+                matches = np.flatnonzero(parent_adjacent == source_cell)
+                if matches.size != 1:
+                    raise RuntimeError(
+                        f"source cell {source_cell} is not adjacent to source edge "
+                        f"{source_edge}"
+                    )
+                parent_side = int(matches[0])
+                used_parent_sides.add(parent_side)
             else:
-                edge_cell_distance[edge_index, side] = edge_cell_distance[edge_index, 0]
-                dual_edge_lengths[edge_index] = 2.0 * edge_cell_distance[edge_index, 0]
-    edge_system_orientation = np.ones(topology.edges.shape[0], dtype=np.int32)
-    normals = gg._edge_normal_fields(
-        geometry.vertices,
-        topology.edges,
-        topology.edge_center_xyz,
-        edge_system_orientation,
+                unused_parent_sides = {0, 1} - used_parent_sides
+                parent_side = min(unused_parent_sides) if unused_parent_sides else 0
+            edge_cell_distance[edge_index, side] = parent.geometry[
+                "edge_cell_distance"
+            ][source_edge, parent_side]
+
+    normal_sign = _source_normal_sign(parent, geometry, topology)
+    edge_system_orientation = _source_edge_system_orientation(
+        parent,
+        geometry,
+        topology,
+        normal_sign,
+    )
+    normals = {
+        name: parent.geometry[name][source_edges] * normal_sign[:, np.newaxis]
+        for name in (
+            "edge_primal_normal_cartesian",
+            "edge_dual_normal_cartesian",
+        )
+    }
+    normals.update(
+        {
+            name: parent.geometry[name][source_edges] * normal_sign
+            for name in (
+                "zonal_normal_primal_edge",
+                "meridional_normal_primal_edge",
+                "zonal_normal_dual_edge",
+                "meridional_normal_dual_edge",
+            )
+        }
     )
     cell_areas = parent.geometry["cell_area"][geometry.source_cell_index]
     return MetricsData(
@@ -411,10 +445,54 @@ def _limited_metrics(parent: Any, geometry: GeometryData, topology: TopologyData
             "orientation_of_normal": topology.icon_connectivity["orientation_of_normal"],
             "edge_system_orientation": edge_system_orientation,
             "edge_orientation": topology.icon_connectivity["edge_orientation"],
-            "edgequad_area": 0.5 * edge_lengths * dual_edge_lengths,
+            "edgequad_area": parent.geometry["edgequad_area"][source_edges],
             **normals,
         }
     )
+
+
+def _source_normal_sign(
+    parent: Any,
+    geometry: GeometryData,
+    topology: TopologyData,
+) -> np.ndarray:
+    signs = np.ones(topology.edges.shape[0], dtype=np.int32)
+    for edge_index, adjacent in enumerate(topology.edge_cells):
+        source_edge = int(topology.source_edge_index[edge_index])
+        parent_adjacent = parent.edge_cells[source_edge]
+        first_source_cell = int(geometry.source_cell_index[adjacent[0]])
+        if first_source_cell == int(parent_adjacent[0]):
+            signs[edge_index] = 1
+        elif first_source_cell == int(parent_adjacent[1]):
+            signs[edge_index] = -1
+        else:
+            raise RuntimeError(
+                f"source cell {first_source_cell} is not adjacent to source edge "
+                f"{source_edge}"
+            )
+    return signs
+
+
+def _source_edge_system_orientation(
+    parent: Any,
+    geometry: GeometryData,
+    topology: TopologyData,
+    normal_sign: np.ndarray,
+) -> np.ndarray:
+    source_edges = topology.source_edge_index
+    local_source_vertices = geometry.source_vertex_index[topology.edges]
+    parent_edges = parent.edges[source_edges]
+    same_direction = np.all(local_source_vertices == parent_edges, axis=1)
+    reverse_direction = np.all(local_source_vertices == parent_edges[:, ::-1], axis=1)
+    if not np.all(same_direction | reverse_direction):
+        bad_edge = int(np.flatnonzero(~(same_direction | reverse_direction))[0])
+        raise RuntimeError(f"local edge {bad_edge} does not match its source edge")
+    endpoint_sign = np.where(same_direction, 1, -1).astype(np.int32)
+    return (
+        parent.geometry["edge_system_orientation"][source_edges]
+        * endpoint_sign
+        * normal_sign
+    ).astype(np.int32)
 
 
 def _limited_refinement(

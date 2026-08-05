@@ -12,7 +12,14 @@ from grid_generator import (
     generate_grid,
 )
 from grid_generator.cutting import CutGridSpec, cut_grid
+from grid_generator.diagnostics import cell_divergence
 from grid_generator.planar import RaggedOrthogonalGridSpec, StretchedTorusGridSpec
+from grid_generator.transforms import (
+    DiffusionOptions,
+    OptimizationOptions,
+    diffuse_grid,
+    optimize_grid,
+)
 
 
 def test_torus_grid_has_periodic_topology_and_planar_metrics():
@@ -29,11 +36,165 @@ def test_torus_grid_has_periodic_topology_and_planar_metrics():
     assert np.allclose(grid.geometry["edge_length"], edge_length)
     assert np.allclose(grid.geometry["cell_area"], np.sqrt(3.0) * 0.25 * edge_length**2)
     assert np.allclose(grid.geometry["dual_edge_length"], edge_length / np.sqrt(3.0))
-    assert np.allclose(grid.geometry["edgequad_area"], 0.0)
+    assert np.allclose(
+        grid.geometry["edgequad_area"],
+        0.5 * edge_length**2 / np.sqrt(3.0),
+    )
     assert np.all(np.isfinite(grid.vertices))
     assert np.all(np.isfinite(grid.cell_center_xyz))
     assert np.all(np.isfinite(grid.edge_center_xyz))
     assert np.all(np.isfinite(grid.geometry["edge_primal_normal_cartesian"]))
+
+
+def test_torus_coordinates_metrics_normals_and_transforms_share_periodic_geometry():
+    grid = generate_grid(TorusGridSpec(nx=32, ny=16, edge_length=1.0))
+    vectors = _torus_minimum_image_vectors(
+        grid.vertices[grid.edges[:, 1]] - grid.vertices[grid.edges[:, 0]],
+        grid.spec,
+    )
+
+    assert np.allclose(np.linalg.norm(vectors[:, :2], axis=1), 1.0)
+    assert np.allclose(grid.geometry["edge_length"], np.linalg.norm(vectors, axis=1))
+    assert np.allclose(
+        cell_divergence(
+            grid,
+            grid.geometry["edge_primal_normal_cartesian"][:, 0],
+        ),
+        0.0,
+        atol=1.0e-12,
+    )
+    assert np.allclose(
+        cell_divergence(
+            grid,
+            grid.geometry["edge_primal_normal_cartesian"][:, 1],
+        ),
+        0.0,
+        atol=1.0e-12,
+    )
+
+    transformed = (
+        optimize_grid(grid, OptimizationOptions(iterations=1, relaxation=0.25)),
+        diffuse_grid(grid, DiffusionOptions(iterations=1, diffusion_constant=0.1)),
+    )
+    for result in transformed:
+        assert np.allclose(result.geometry["edge_length"], 1.0)
+        assert np.allclose(result.geometry["cell_area"], np.sqrt(3.0) * 0.25)
+
+
+def _torus_minimum_image_vectors(vectors, spec):
+    result = np.empty_like(vectors, dtype=np.float64)
+    y_shift = (
+        0.5
+        * spec.ny
+        * spec.edge_length
+        * getattr(spec, "stretch_x", 1.0)
+    )
+    for index, vector in enumerate(vectors):
+        best = None
+        best_norm = np.inf
+        y_center = int(np.rint(vector[1] / spec.domain_height))
+        for y_wrap in range(y_center - 1, y_center + 2):
+            candidate = vector.copy()
+            candidate[1] -= y_wrap * spec.domain_height
+            candidate[0] -= y_wrap * y_shift
+            candidate[0] -= np.rint(candidate[0] / spec.domain_length) * spec.domain_length
+            norm = np.linalg.norm(candidate[:2])
+            if norm < best_norm:
+                best = candidate
+                best_norm = norm
+        result[index] = best
+    return result
+
+
+def _geometric_dual_edge_lengths(grid):
+    expected = np.empty(grid.dims["edge"], dtype=np.float64)
+    interior = grid.edge_cells[:, 1] >= 0
+    adjacent = grid.edge_cells[interior]
+    vectors = (
+        grid.cell_center_xyz[adjacent[:, 1]]
+        - grid.cell_center_xyz[adjacent[:, 0]]
+    )
+    if getattr(grid.spec, "periodic", False):
+        vectors = _torus_minimum_image_vectors(vectors, grid.spec)
+    elif getattr(grid.spec, "periodic_x", False):
+        period = grid.spec.nx * grid.spec.edge_length
+        vectors[:, 0] -= np.rint(vectors[:, 0] / period) * period
+    expected[interior] = np.linalg.norm(vectors, axis=1)
+
+    boundary = ~interior
+    vectors = (
+        grid.edge_center_xyz[boundary]
+        - grid.cell_center_xyz[grid.edge_cells[boundary, 0]]
+    )
+    if getattr(grid.spec, "periodic_x", False):
+        period = grid.spec.nx * grid.spec.edge_length
+        vectors[:, 0] -= np.rint(vectors[:, 0] / period) * period
+    expected[boundary] = 2.0 * np.linalg.norm(vectors, axis=1)
+    return expected
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        StretchedTorusGridSpec(
+            nx=6,
+            ny=5,
+            edge_length=2.0,
+            stretch_x=1.5,
+            stretch_y=0.75,
+        ),
+        StretchedTorusGridSpec(
+            nx=6,
+            ny=5,
+            edge_length=2.0,
+            stretch_x=1.5,
+            stretch_y=1.0,
+        ),
+        ParallelogramGridSpec(
+            nx=6,
+            ny=5,
+            edge_length=2.0,
+            shear=0.8,
+        ),
+        RaggedOrthogonalGridSpec(
+            nx=6,
+            ny=5,
+            dx=2.0,
+            dy=1.3,
+            raggedness=0.3,
+        ),
+    ],
+)
+def test_planar_dual_edge_lengths_follow_generated_cell_centers(spec):
+    grid = generate_grid(spec)
+
+    assert np.allclose(
+        grid.geometry["dual_edge_length"],
+        _geometric_dual_edge_lengths(grid),
+    )
+    assert np.all(grid.geometry["edgequad_area"] > 0.0)
+    assert np.all(
+        grid.geometry["edgequad_area"]
+        <= 0.5
+        * grid.geometry["edge_length"]
+        * grid.geometry["dual_edge_length"]
+        * (1.0 + 1.0e-12)
+    )
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        ChannelGridSpec(nx=6, ny=5, edge_length=2.0),
+        ParallelogramGridSpec(nx=6, ny=5, edge_length=2.0, shear=0.4),
+    ],
+)
+def test_open_planar_dual_areas_partition_primal_area(spec):
+    grid = generate_grid(spec)
+
+    assert grid.geometry["dual_area"].sum() == pytest.approx(
+        grid.geometry["cell_area"].sum()
+    )
 
 
 @pytest.mark.parametrize(
@@ -150,6 +311,56 @@ def test_limited_area_can_use_raw_or_explicitly_optimized_global_parent():
     assert optimized_grid.dims["cell"] > 0
 
 
+def test_limited_area_normals_follow_local_cell_order_and_parent_provenance():
+    parent = generate_grid("R01B02", optimize_global=False)
+    grid = generate_grid(
+        LimitedAreaGridSpec(
+            parent="R01B02",
+            region=Region.lonlat_box(
+                lon_min=-100.0,
+                lon_max=100.0,
+                lat_min=-60.0,
+                lat_max=60.0,
+            ),
+            boundary_depth=1,
+        ),
+        optimize_global=False,
+    )
+    source_edges = grid.refinement["parent_edge_index"] - 1
+    first_source_cells = (
+        grid.refinement["parent_cell_index"][grid.edge_cells[:, 0]] - 1
+    )
+    expected_sign = np.where(
+        first_source_cells == parent.edge_cells[source_edges, 0],
+        1.0,
+        -1.0,
+    )
+    normal_alignment = np.sum(
+        grid.geometry["edge_primal_normal_cartesian"]
+        * parent.geometry["edge_primal_normal_cartesian"][source_edges],
+        axis=1,
+    )
+
+    assert np.allclose(normal_alignment, expected_sign)
+    assert grid.metadata["uuidOfParHGrid"] == parent.metadata["uuidOfHGrid"]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        ChannelGridSpec(nx=5, ny=3, edge_length=1.0),
+        ParallelogramGridSpec(nx=4, ny=3, edge_length=1.0),
+        RaggedOrthogonalGridSpec(nx=4, ny=3, dx=1.0, dy=0.8),
+    ],
+)
+def test_open_planar_normals_give_zero_divergence_for_constant_vectors(spec):
+    grid = generate_grid(spec)
+    normals = grid.geometry["edge_primal_normal_cartesian"]
+
+    assert np.allclose(cell_divergence(grid, normals[:, 0]), 0.0, atol=1.0e-12)
+    assert np.allclose(cell_divergence(grid, normals[:, 1]), 0.0, atol=1.0e-12)
+
+
 def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
     parent = generate_grid("R02B01", options={"max_cells": None})
     keep_spec = CutGridSpec(
@@ -189,6 +400,31 @@ def test_cut_grid_supports_region_predicates_keep_remove_and_metadata():
     assert np.any(cut.edge_cells[:, 1] < 0)
     assert np.all(cut.refinement["parent_cell_index"] > 0)
     assert np.all(cut.refinement["smooth_c_ctrl"] == 2)
+    assert cut.metadata["uuidOfParHGrid"] == parent.metadata["uuidOfHGrid"]
+    assert cut.metadata["grid_mapping_name"] == parent.metadata["grid_mapping_name"]
+    assert cut.metadata["crs_name"] == parent.metadata["crs_name"]
+
+
+def test_derived_grid_uuids_include_parent_identity_and_parent_options():
+    region = Region.circle(lon=0.0, lat=0.0, radius_degrees=60.0)
+    limited_spec = LimitedAreaGridSpec(parent="R01B02", region=region)
+    unrotated = generate_grid(limited_spec, optimize_global=False)
+    rotated = generate_grid(
+        limited_spec,
+        optimize_global=False,
+        north_pole_lon=30.0,
+        north_pole_lat=70.0,
+        rotation_angle_degrees=10.0,
+    )
+    first_parent = generate_grid("R01B01", optimize_global=False)
+    second_parent = generate_grid("R02B01", optimize_global=False)
+    first_cut = cut_grid(first_parent, region)
+    second_cut = cut_grid(second_parent, region)
+
+    assert unrotated.metadata["uuidOfHGrid"] != rotated.metadata["uuidOfHGrid"]
+    assert first_cut.metadata["uuidOfHGrid"] != second_cut.metadata["uuidOfHGrid"]
+    assert first_cut.metadata["uuidOfParHGrid"] == first_parent.metadata["uuidOfHGrid"]
+    assert second_cut.metadata["uuidOfParHGrid"] == second_parent.metadata["uuidOfHGrid"]
 
 
 def test_cut_grid_accepts_region_directly_for_common_case():

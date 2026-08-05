@@ -42,6 +42,9 @@ topology diagnostics.
 
 - [Examples](examples.md)
 - [API overview](api.md)
+- [Coordinates, units, and indexing](api.md#coordinates-units-and-indexing)
+- [Regional cutting semantics](api.md#cutting)
+- [Grid optimization guide](api.md#grid-optimization)
 - [Design notes and limitations](design.md)
 - [Changelog](https://github.com/ofuhrer/icon-grid-generator/blob/main/CHANGELOG.md)
 - [Citation metadata](https://github.com/ofuhrer/icon-grid-generator/blob/main/CITATION.cff)

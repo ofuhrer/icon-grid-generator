@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from grid_generator import ChannelGridSpec, LimitedAreaGridSpec, Region, TorusGridSpec, generate_grid
 from grid_generator.cutting import cut_grid
-from grid_generator.visualization import write_svg
+from grid_generator.visualization import _projected_segments, write_svg
 
 
 @pytest.mark.parametrize(
@@ -58,3 +59,28 @@ def test_write_svg_rejects_invalid_render_options(tmp_path):
         write_svg(grid, tmp_path / "bad.svg", width=0)
     with pytest.raises(ValueError, match="max_edges"):
         write_svg(grid, tmp_path / "bad.svg", max_edges=0)
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        generate_grid(TorusGridSpec(nx=8, ny=5, edge_length=1.0)),
+        generate_grid(ChannelGridSpec(nx=8, ny=5, edge_length=1.0)),
+    ],
+)
+def test_periodic_svg_projection_omits_wraparound_segments(grid):
+
+    segments = _projected_segments(
+        grid,
+        grid.vertex_lon,
+        grid.vertex_lat,
+        grid.edges,
+        width=800,
+        height=500,
+    )
+    lengths = [
+        ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        for x0, y0, x1, y1 in segments
+    ]
+
+    assert max(lengths) <= 2.0 * float(np.median(lengths))

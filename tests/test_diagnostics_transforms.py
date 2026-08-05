@@ -58,6 +58,8 @@ def test_transforms_keep_planar_cut_grids_planar():
         assert np.allclose(transformed.vertices[:, 2], cut.vertices[:, 2])
         assert np.max(np.linalg.norm(transformed.vertices[:, :2], axis=1)) > parent.options.radius
         assert np.all(transformed.geometry["cell_area"] > 0.0)
+        assert transformed.metadata["uuidOfParHGrid"] == parent.metadata["uuidOfHGrid"]
+        assert transformed.metadata["uuidOfHGrid"] != cut.metadata["uuidOfHGrid"]
 
 
 def test_transforms_keep_spherical_cut_grids_spherical():
@@ -71,6 +73,78 @@ def test_transforms_keep_spherical_cut_grids_spherical():
     assert np.array_equal(optimized.cells, cut.cells)
     assert np.array_equal(optimized.edges, cut.edges)
     assert np.allclose(np.linalg.norm(optimized.vertices, axis=1), parent.options.radius)
+    assert optimized.metadata["uuidOfParHGrid"] == parent.metadata["uuidOfHGrid"]
+    assert optimized.metadata["uuidOfHGrid"] != cut.metadata["uuidOfHGrid"]
+
+
+def test_periodic_cut_transforms_reuse_parent_lattice_geometry():
+    parent = generate_grid(TorusGridSpec(nx=6, ny=5, edge_length=1.0))
+    cut = cut_grid(
+        parent,
+        Region.lonlat_box(
+            lon_min=-180.0,
+            lon_max=180.0,
+            lat_min=-90.0,
+            lat_max=90.0,
+        ),
+    )
+
+    unchanged = diffuse_grid(cut, DiffusionOptions(iterations=0))
+    transformed = diffuse_grid(
+        cut,
+        DiffusionOptions(iterations=1, fixed_boundary=False),
+    )
+
+    assert unchanged is cut
+    assert transformed.geometry_spec is parent.spec
+    assert np.allclose(transformed.geometry["edge_length"], 1.0)
+    assert transformed.metadata["uuidOfParHGrid"] == parent.metadata["uuidOfHGrid"]
+
+
+def test_nested_planar_cut_retains_ultimate_geometry_family():
+    parent = generate_grid(TorusGridSpec(nx=6, ny=5, edge_length=1.0))
+    first = cut_grid(
+        parent,
+        Region.lonlat_box(
+            lon_min=-180.0,
+            lon_max=0.0,
+            lat_min=-90.0,
+            lat_max=90.0,
+        ),
+    )
+    second = cut_grid(
+        first,
+        Region.lonlat_box(
+            lon_min=-180.0,
+            lon_max=180.0,
+            lat_min=-90.0,
+            lat_max=90.0,
+        ),
+    )
+
+    transformed = diffuse_grid(
+        second,
+        DiffusionOptions(iterations=1, fixed_boundary=False),
+    )
+
+    assert second.metadata["parent_grid_geometry"] == 3
+    assert second.metadata["source_grid_geometry"] == 2
+    assert transformed.geometry_spec is parent.spec
+    assert np.allclose(transformed.vertices[:, 2], second.vertices[:, 2])
+
+
+def test_geometry_changing_transform_receives_deterministic_new_uuid():
+    grid = generate_grid("R01B02", optimize_global=False)
+    options = OptimizationOptions(iterations=2, fixed_boundary=False)
+
+    first = optimize_grid(grid, options)
+    second = optimize_grid(grid, options)
+
+    assert not np.allclose(first.vertices, grid.vertices)
+    assert first.metadata["uuidOfHGrid"] != grid.metadata["uuidOfHGrid"]
+    assert first.metadata["uuidOfHGrid"] == second.metadata["uuidOfHGrid"]
+    assert first.metadata["geometry_transform"] == "optimization"
+    assert first.metadata["geometry_transform_source_uuid"] == grid.metadata["uuidOfHGrid"]
 
 
 def test_geometry_postprocessing_rejects_invalid_option_objects():
@@ -90,6 +164,7 @@ def test_diagnostics_and_postprocessing_core_operators():
 
     assert check.ok
     assert not check.errors
+    assert not check.warnings
     assert stats.cells == grid.dims["cell"]
     assert stats.boundary_edges == 0
     assert props.area.shape == (grid.dims["cell"],)

@@ -48,12 +48,28 @@ deterministic pipeline:
   carries variant flags such as `periodic` and `periodic_x`; `_planar.py`
   dispatches geometry, topology, and metric behavior from those flags instead
   of adding separate public generation entry points.
+- Doubly periodic triangular grids use the two coupled lattice vectors of the
+  skew fundamental domain. Crossing the periodic y boundary therefore applies
+  both a y wrap and the corresponding x shift. Geometry transforms use the same
+  minimum-image convention when averaging neighboring vertices.
+- Planar dual-edge lengths are computed from generated cell centers through
+  edge centers rather than assumed equilateral formulas. Planar vertex dual
+  areas use one third of each incident triangle, so open-grid dual areas
+  partition the total primal area without assigning full interior control
+  volumes to boundary vertices. Planar `edgequad_area` uses the cross product
+  of primal and dual edge vectors, so sheared grids include their actual
+  intersection angle rather than assuming orthogonality.
 - Limited-area and cut grids are compacted views of an `IconGrid` selected by
   region predicates plus optional boundary expansion. They deliberately reuse
   the open-mesh topology, metrics, and refinement reconstruction path so
   regional extraction does not fork the grid contract.
 - Geometry optimization and diffusion are post-generation transforms that
-  preserve topology and rebuild geometry-derived fields. Global spring
+  preserve topology and rebuild geometry-derived fields. Cut grids retain the
+  source spec needed for periodic coordinate reconstruction. A nontrivial
+  public transform receives a deterministic UUID derived from the input grid
+  UUID and canonical transform options while preserving `uuidOfParHGrid`;
+  `geometry_transform_source_uuid` records that immediate input and zero-step
+  transforms return the input grid unchanged. Global spring
   relaxation shares the same module but remains part of global generation when
   `optimize_global=True`.
 - Spherical `dual_area` follows the ICON grid-file contract: each vertex area
@@ -63,9 +79,20 @@ deterministic pipeline:
 - Optional Numba acceleration is an implementation detail selected through
   `IconGridOptions.accelerator`; NumPy remains the required baseline.
 - UUIDs use deterministic UUIDv5 payloads derived from canonical specs and
-  options. Any payload change is a compatibility change.
+  options. Limited-area and cut-grid payloads include the source parent UUID,
+  and `uuidOfParHGrid` records that source. Any payload change is a
+  compatibility change.
 - NetCDF export is an internal module boundary. Public users should call
   `IconGrid.to_netcdf(path)`.
+- For compatibility with established ICON grid files, spherical NetCDF
+  `edgequad_area` values are normalized by `sphere_radius**2`. The exported
+  variable is therefore dimensionless (`units = "1"`) and carries a
+  `normalization` attribute. In-memory `IconGrid.geometry` retains physical
+  square-metre values. This compatibility convention is not applied to planar
+  grids.
+- Xarray public connectivity is zero-based with `-1` for missing neighbors;
+  parent-provenance arrays remain one-based with `0` for no parent. Variables
+  carry explicit `start_index` and `missing_value` attributes.
 - Pipeline stage results use frozen dataclasses to keep builder boundaries
   explicit. Arrays remain mutable NumPy buffers during construction; callers
   should treat completed `IconGrid` objects as immutable values.
@@ -75,6 +102,58 @@ deterministic pipeline:
   facade again.
 - Performance checks live behind `make perf-check` and are intentionally
   separate from default CI-style checks because runtime varies with local load.
+
+## Optimization Algorithms
+
+### Staged Global Spring System
+
+Default global generation operates recursively across bisection levels. A
+parent stage is generated and relaxed before its child is refined, and the child
+is then relaxed as another stage. The spring kernel normalizes coordinates to
+the unit sphere, computes the initial mean angular edge length, and uses
+`1.164 * beta_spring` times that mean as its rest angle. Incident edge forces
+are accumulated per vertex and integrated with a damped velocity. Every
+position and velocity update is projected into the sphere tangent geometry.
+
+The time step is `0.016` for the first 50 steps, increases through step 150, and
+is `0.08` thereafter. Iteration is bounded by the stage cap and may terminate
+early when the force statistic reaches its observed maximum or kinetic energy
+falls below `0.001` of its observed maximum. For stages whose parent has fewer
+than 100,000 cells, the internal cap is ten times the requested
+`spring_iterations`; the public metadata records the requested setting rather
+than the realized number of integration steps.
+
+A `B0` specification returns the completed root geometry directly because no
+bisection stage exists; consequently the staged relaxation path is not entered.
+
+This path aims to reduce edge-length and cell-area variation while retaining
+the exact refined topology. It is a compatibility-oriented heuristic, not an
+optimization with a reported scalar objective or formal convergence proof.
+
+### General Smoothing and Diffusion
+
+`optimize_grid()` and `diffuse_grid()` build undirected vertex adjacency from
+the immutable edge table. Each iteration is Jacobi-style: all targets are
+computed from the previous vertex array and applied simultaneously.
+
+Without `target_edge_length`, `optimize_grid()` moves a fraction `relaxation`
+toward the mean neighbor displacement. With a target length, each active edge
+direction is normalized, scaled to the requested length, and translated back to
+the current vertex before the incident proposals are averaged. `diffuse_grid()`
+uses the same mean displacement multiplied by
+`diffusion_constant * dt * neighbor_weight`.
+
+Periodic displacements use the same coupled lattice minimum-image operation as
+metric generation. Spherical vertices are renormalized to `radius`; planar z
+coordinates are restored; periodic planar coordinates are wrapped to the
+fundamental domain. Open-boundary vertices are excluded from updates when
+`fixed_boundary=True`.
+
+After movement, the grid rebuilds centers, projected coordinates, metric fields,
+normal vectors, and summary metadata. Topology and refinement arrays are
+unchanged. Public transforms derive a new UUID from the source UUID, operation,
+and canonical option payload. No inversion detector or line search is part of
+the update, so callers remain responsible for checking scientific quality.
 
 ## Limitations
 
@@ -92,6 +171,20 @@ deterministic pipeline:
 - The implementation assumes closed global triangular meshes have vertex
   valence at most six. Limited-area and planar grids use separate open-mesh
   paths where boundary sentinels are expected.
+- Longitude/latitude rectangles and polygons are center-selection predicates
+  evaluated in a wrapped equirectangular lon/lat plane. Circles use great-circle
+  angular distance. Use small regional rectangles/polygons away from the poles,
+  or provide an explicit scientific comparison for polar and very large areas.
+- Planar `lon`/`lat` fields are normalized compatibility and visualization
+  coordinates, not a geographic CRS. Scientific planar calculations should use
+  Cartesian coordinates and metric arrays.
+- `smoothing_depth` on a cut is an ICON control-field value written uniformly
+  to `smooth_c_ctrl`; it does not invoke the geometry smoothing algorithms.
+- `check_grid()` is a structural check. It does not independently rederive all
+  metric fields, test cell inversion, or certify a grid for a numerical model.
+- `write_svg()` is an equirectangular-style diagnostic preview. It omits
+  periodic seam segments and can subsample edges, so it must not be used to
+  assess metric distances, areas, or complete seam topology.
 
 ## Performance and Scaling
 

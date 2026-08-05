@@ -72,8 +72,18 @@ def _projected_segments(
     x1 = lon[edges[:, 1]]
     y1 = lat[edges[:, 1]]
 
-    if int(getattr(grid, "metadata", {}).get("grid_geometry", 0)) == 1:
+    metadata = getattr(grid, "metadata", {})
+    is_spherical = int(metadata.get("grid_geometry", 0)) == 1
+    is_periodic = bool(metadata.get("periodic") or metadata.get("source_periodic"))
+    is_periodic_x = bool(
+        is_periodic
+        or metadata.get("periodic_x")
+        or metadata.get("source_periodic_x")
+    )
+    if is_spherical or is_periodic_x:
         keep = np.abs(x0 - x1) <= 180.0
+        if is_periodic:
+            keep &= np.abs(y0 - y1) <= 90.0
         x0 = x0[keep]
         y0 = y0[keep]
         x1 = x1[keep]

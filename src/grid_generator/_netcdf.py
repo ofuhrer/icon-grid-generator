@@ -349,8 +349,18 @@ def _connectivity_fields(grid: Any) -> list[IconNetcdfField]:
 
 def _metric_fields(grid: Any) -> list[IconNetcdfField]:
     geometry = grid.geometry
-    edgequad_normalizer = (
-        1.0 if grid.metadata.get("grid_geometry") == 2 else grid.options.sphere_radius**2
+    is_planar = (
+        grid.metadata.get("grid_geometry") == 2
+        or grid.metadata.get("source_grid_geometry") == 2
+    )
+    edgequad_normalizer = 1.0 if is_planar else grid.options.sphere_radius**2
+    edgequad_attrs = (
+        {"units": "m2"}
+        if is_planar
+        else {
+            "units": "1",
+            "normalization": "physical edge quadrilateral area divided by sphere_radius squared",
+        }
     )
     return [
         ("cell_area", ("cell",), geometry["cell_area"], {"units": "m2"}),
@@ -365,7 +375,7 @@ def _metric_fields(grid: Any) -> list[IconNetcdfField]:
             "edgequad_area",
             ("edge",),
             geometry["edgequad_area"] / edgequad_normalizer,
-            {"units": "m2"},
+            edgequad_attrs,
         ),
         ("orientation_of_normal", ("nv", "cell"), geometry["orientation_of_normal"].T, {}),
         ("edge_system_orientation", ("edge",), geometry["edge_system_orientation"], {}),

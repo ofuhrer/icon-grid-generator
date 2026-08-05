@@ -236,17 +236,29 @@ write_svg(cut, output / "cut_multi_region.svg")
 
 ![Multi-region cut grid](assets/examples/cut_multi_region.svg)
 
+Here `boundary_depth` adds neighbor rings around the selected cells.
+`smoothing_depth` does not alter the geometry; it populates the exported ICON
+`smooth_c_ctrl` field for downstream use.
+
 ## Diagnostics And Transforms
 
 Diagnostics inspect a grid without changing it. Transforms return a new grid
-with unchanged topology.
+with unchanged topology and recomputed geometry. This example applies cautious
+Laplacian smoothing and explicit diffusion, then compares triangle angles. A
+higher minimum angle is only one possible quality measure; choose criteria that
+match the downstream numerical method.
 
 ```python
 from pathlib import Path
 
 from grid_generator import ChannelGridSpec, generate_grid
-from grid_generator.diagnostics import check_grid, grid_statistics
-from grid_generator.transforms import OptimizationOptions, optimize_grid
+from grid_generator.diagnostics import check_grid, grid_statistics, triangle_properties
+from grid_generator.transforms import (
+    DiffusionOptions,
+    OptimizationOptions,
+    diffuse_grid,
+    optimize_grid,
+)
 from grid_generator.visualization import write_svg
 
 output = Path("grid_examples")
@@ -256,9 +268,18 @@ grid = generate_grid(ChannelGridSpec(nx=8, ny=5, edge_length=1_000.0))
 check = check_grid(grid)
 stats = grid_statistics(grid)
 optimized = optimize_grid(grid, OptimizationOptions(iterations=2, relaxation=0.1))
+diffused = diffuse_grid(
+    grid,
+    DiffusionOptions(iterations=2, diffusion_constant=0.05),
+)
 
 assert check.ok
 print(stats.cells, stats.boundary_edges)
+print(
+    triangle_properties(grid).min_angle_degrees.min(),
+    triangle_properties(optimized).min_angle_degrees.min(),
+    triangle_properties(diffused).min_angle_degrees.min(),
+)
 write_svg(optimized, output / "optimized_channel.svg")
 ```
 

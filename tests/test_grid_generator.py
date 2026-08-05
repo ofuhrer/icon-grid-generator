@@ -361,6 +361,11 @@ def test_global_optimization_options_can_be_configured_and_called_directly():
     assert facade.metadata["global_optimization_iterations"] == 20
     assert np.all(np.isfinite(optimized.geometry["cell_area"]))
     assert not np.allclose(optimized.vertices, raw.vertices)
+    assert optimized.metadata["uuidOfHGrid"] != raw.metadata["uuidOfHGrid"]
+    assert optimized.metadata["geometry_transform"] == "global_spring"
+    assert optimized.metadata["geometry_transform_source_uuid"] == raw.metadata["uuidOfHGrid"]
+    assert optimized.metadata["global_optimization"] == "spring"
+    assert optimized.metadata["global_optimization_iterations"] == 20
 
 
 @pytest.mark.parametrize(

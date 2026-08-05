@@ -67,8 +67,17 @@ def check_grid(grid: Any) -> GridCheckResult:
         errors.append("edges contain duplicate vertex pairs")
     if np.any(grid.edge_cells[:, 1] < 0):
         warnings.append("grid has open boundary edges")
-    elif grid.dims["vertex"] - grid.dims["edge"] + grid.dims["cell"] != 2:
-        warnings.append("closed grid Euler characteristic is not spherical")
+    else:
+        characteristic = grid.dims["vertex"] - grid.dims["edge"] + grid.dims["cell"]
+        metadata = getattr(grid, "metadata", {})
+        is_periodic = bool(metadata.get("periodic") or metadata.get("source_periodic"))
+        expected = 0 if is_periodic else 2
+        topology = "toroidal" if is_periodic else "spherical"
+        if characteristic != expected:
+            warnings.append(
+                f"closed grid Euler characteristic is not {topology} "
+                f"(expected {expected}, got {characteristic})"
+            )
     return GridCheckResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
 
 

@@ -28,12 +28,6 @@ from ._planar import (
     PlanarTriangularMetricsBuilder,
     PlanarTriangularTopologyBuilder,
 )
-from ._torus import (
-    PeriodicTopologyBuilder,
-    PlanarTorusGeometry,
-    PlanarTorusMetricsBuilder,
-    TorusRefinementBuilder,
-)
 from ._types import BisectionProvenance, GeometryData
 from ._global import (
     _GlobalGenerationContext as _GlobalGenerationContext,
@@ -53,10 +47,6 @@ from . import _accelerated
 GRID_NAME_RE = re.compile(r"^R0*(\d+)B0*(\d+)$", re.IGNORECASE)
 EARTH_RADIUS_M = 6_371_229.0
 POINT_MATCH_DECIMALS = 11
-XYZ_LABELS = np.array(["x", "y", "z"])
-CELL_VERTEX_LABELS = np.array([0, 1, 2], dtype=np.int32)
-EDGE_VERTEX_LABELS = np.array([0, 1], dtype=np.int32)
-EDGE_CELL_LABELS = np.array([0, 1], dtype=np.int32)
 FIXED_DIMS = {
     "nc": 2,
     "nv": 3,
@@ -149,6 +139,8 @@ class TorusGridSpec:
     ny: int
     edge_length: float
     name: str = ""
+
+    periodic: bool = field(default=True, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.nx, int) or isinstance(self.nx, bool) or self.nx < 3:
@@ -347,7 +339,12 @@ class RaggedOrthogonalGridSpec:
 
 @dataclass(frozen=True)
 class LimitedAreaGridSpec:
-    """Limited-area grid extracted from a generated global parent grid."""
+    """Limited-area grid extracted from a generated global parent grid.
+
+    The region selects parent cell centers, and ``boundary_depth`` adds that
+    many cell-neighbor rings after selection. The complete parent is generated
+    with the same :class:`IconGridOptions` before extraction.
+    """
 
     parent: str | GlobalGridSpec
     region: Any
@@ -557,7 +554,12 @@ def _region_class_name(region: Any) -> str:
 
 @dataclass(frozen=True)
 class CutGridSpec:
-    """Selection options for extracting a cut grid from an existing grid."""
+    """Selection options for extracting a cut grid from an existing grid.
+
+    Multiple regions are combined by union. ``boundary_depth`` expands the
+    retained cells by neighbor rings; ``smoothing_depth`` only populates the
+    ICON ``smooth_c_ctrl`` field and does not smooth geometry.
+    """
 
     regions: Any
     mode: str = "keep"
@@ -598,7 +600,14 @@ _SUPPORTED_GRID_SPEC_TYPES = (
 
 @dataclass(frozen=True)
 class IconGridOptions:
-    """Options for pure Python ICON grid generation."""
+    """Options for pure Python ICON grid generation.
+
+    ``radius`` controls spherical Cartesian coordinates, while
+    ``sphere_radius`` controls physical spherical metrics. Keyword options
+    passed directly to :func:`generate_grid` override fields in an options
+    instance. The ``fixed_boundary`` field belongs to global spring settings;
+    post-generation transforms use their own option dataclasses.
+    """
 
     max_cells: int | None = 2_000_000
     accelerator: str = "auto"
@@ -641,7 +650,12 @@ class IconGridOptions:
 
 @dataclass(frozen=True)
 class IconGrid:
-    """ICON grid geometry, topology, metrics, and NetCDF export support."""
+    """ICON grid geometry, topology, metrics, and export support.
+
+    The dataclass is frozen but its NumPy arrays remain mutable. Callers should
+    treat completed grids as immutable values; :meth:`to_dict` returns existing
+    arrays rather than defensive copies.
+    """
 
     spec: Any
     options: IconGridOptions
@@ -666,6 +680,7 @@ class IconGrid:
     geometry: dict[str, np.ndarray] = field(default_factory=dict)
     refinement: dict[str, np.ndarray] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    geometry_spec: Any | None = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -716,44 +731,10 @@ class IconGrid:
         return data
 
     def to_xarray(self) -> Any:
-        """Return an xarray Dataset, importing xarray only when requested."""
-        import xarray as xr
+        """Return a complete xarray Dataset, importing xarray only on demand."""
+        from ._xarray import to_xarray_dataset
 
-        data_vars: dict[str, Any] = {
-            "vertices": (("vertex", "xyz"), self.vertices),
-            "cells": (("cell", "cell_vertex"), self.cells),
-            "lon": (("cell",), self.lon),
-            "lat": (("cell",), self.lat),
-            "vertex_lon": (("vertex",), self.vertex_lon),
-            "vertex_lat": (("vertex",), self.vertex_lat),
-            "cell_center_xyz": (("cell", "xyz"), self.cell_center_xyz),
-            "cell_vertex_lon": (("cell", "cell_vertex"), self.cell_vertex_lon),
-            "cell_vertex_lat": (("cell", "cell_vertex"), self.cell_vertex_lat),
-        }
-        coords: dict[str, Any] = {
-            "xyz": XYZ_LABELS,
-            "cell_vertex": CELL_VERTEX_LABELS,
-        }
-        data_vars["edges"] = (("edge", "edge_vertex"), self.edges)
-        data_vars["cell_edges"] = (("cell", "cell_vertex"), self.cell_edges)
-        data_vars["edge_cells"] = (("edge", "edge_cell"), self.edge_cells)
-        data_vars["edge_center_xyz"] = (("edge", "xyz"), self.edge_center_xyz)
-        data_vars["edge_lon"] = (("edge",), self.edge_lon)
-        data_vars["edge_lat"] = (("edge",), self.edge_lat)
-        coords["edge_vertex"] = EDGE_VERTEX_LABELS
-        coords["edge_cell"] = EDGE_CELL_LABELS
-
-        return xr.Dataset(
-            data_vars=data_vars,
-            coords=coords,
-            attrs={
-                "name": self.name,
-                "root": getattr(self.spec, "root", 0),
-                "bisections": getattr(self.spec, "bisections", 0),
-                "frequency": getattr(self.spec, "frequency", 0),
-                "radius": self.options.radius,
-            },
-        )
+        return to_xarray_dataset(self)
 
     def to_netcdf(self, path: str | Any, *, sphere_radius: float | None = None) -> Any:
         """Write an ICON-style NetCDF grid file."""
@@ -837,14 +818,7 @@ def generate_grid(
         )
     _validate_options(grid_spec, resolved_options)
 
-    if isinstance(grid_spec, TorusGridSpec):
-        return _generate_torus_grid(grid_spec, resolved_options)
-    if isinstance(grid_spec, StretchedTorusGridSpec) and np.isclose(
-        [grid_spec.stretch_x, grid_spec.stretch_y],
-        [1.0, 1.0],
-    ).all():
-        return _generate_torus_grid(grid_spec, resolved_options)
-    if isinstance(grid_spec, _PLANAR_GRID_SPEC_TYPES):
+    if isinstance(grid_spec, (TorusGridSpec, *_PLANAR_GRID_SPEC_TYPES)):
         return _generate_planar_grid(grid_spec, resolved_options)
     if isinstance(grid_spec, LimitedAreaGridSpec):
         return _generate_limited_area_grid(grid_spec, resolved_options)
@@ -966,39 +940,6 @@ def _optimize_global_was_explicit(
 
 
 
-def _generate_torus_grid(spec: TorusGridSpec, options: IconGridOptions) -> IconGrid:
-    geometry = PlanarTorusGeometry().build(spec, options)
-    topology = PeriodicTopologyBuilder().build(spec, options, geometry)
-    metrics = PlanarTorusMetricsBuilder().build(spec, geometry, topology)
-    refinement = TorusRefinementBuilder().build(geometry, topology)
-    metadata = _metadata(spec, options, metrics.fields)
-    return IconGrid(
-        spec=spec,
-        options=options,
-        vertices=geometry.vertices,
-        cells=geometry.cells,
-        lon=geometry.lon,
-        lat=geometry.lat,
-        vertex_lon=geometry.vertex_lon,
-        vertex_lat=geometry.vertex_lat,
-        cell_center_xyz=geometry.cell_center_xyz,
-        cell_vertex_lon=geometry.cell_vertex_lon,
-        cell_vertex_lat=geometry.cell_vertex_lat,
-        edges=topology.edges,
-        cell_edges=topology.cell_edges,
-        edge_cells=topology.edge_cells,
-        edge_center_xyz=topology.edge_center_xyz,
-        edge_lon=topology.edge_lon,
-        edge_lat=topology.edge_lat,
-        icon_connectivity=topology.icon_connectivity,
-        connectivity=topology.connectivity,
-        neighbor_tables=topology.neighbor_tables,
-        geometry=metrics.fields,
-        refinement=refinement.fields,
-        metadata=metadata,
-    )
-
-
 def _generate_planar_grid(spec: Any, options: IconGridOptions) -> IconGrid:
     geometry = PlanarTriangularGeometry().build(spec, options)
     topology = PlanarTriangularTopologyBuilder().build(spec, geometry)
@@ -1037,8 +978,16 @@ def _generate_planar_grid(spec: Any, options: IconGridOptions) -> IconGrid:
 
 
 def _generate_limited_area_grid(spec: LimitedAreaGridSpec, options: IconGridOptions) -> IconGrid:
-    geometry, topology, metrics, refinement = LimitedAreaExtractor().build(spec, options)
-    metadata = _metadata(spec, options, metrics.fields)
+    geometry, topology, metrics, refinement, parent = LimitedAreaExtractor().build(
+        spec,
+        options,
+    )
+    metadata = _metadata(
+        spec,
+        options,
+        metrics.fields,
+        parent_uuid=parent.metadata["uuidOfHGrid"],
+    )
     return IconGrid(
         spec=spec,
         options=options,
@@ -1097,12 +1046,42 @@ def cut_grid(
         )
 
     geometry, topology, metrics, refinement = cut_existing_grid(grid, spec)
-    metadata = _metadata(spec, grid.options, metrics.fields)
+    metadata = _metadata(
+        spec,
+        grid.options,
+        metrics.fields,
+        parent_uuid=grid.metadata["uuidOfHGrid"],
+    )
+    geometry_spec = grid.geometry_spec or grid.spec
+    crs_keys = (
+        "crs_id",
+        "crs_name",
+        "grid_mapping_name",
+        "ellipsoid_name",
+        "semi_major_axis",
+        "inverse_flattening",
+    )
+    metadata.update(
+        {
+            key: grid.metadata[key]
+            for key in crs_keys
+            if key in grid.metadata
+        }
+    )
     metadata.update(
         {
             "source_grid_name": grid.name,
-            "source_grid_geometry": grid.metadata.get("grid_geometry"),
-            "source_grid_mapping_name": grid.metadata.get("grid_mapping_name"),
+            "parent_grid_geometry": grid.metadata.get("grid_geometry"),
+            "source_grid_geometry": grid.metadata.get(
+                "source_grid_geometry",
+                grid.metadata.get("grid_geometry"),
+            ),
+            "source_grid_mapping_name": grid.metadata.get(
+                "source_grid_mapping_name",
+                grid.metadata.get("grid_mapping_name"),
+            ),
+            "source_periodic": int(getattr(geometry_spec, "periodic", False)),
+            "source_periodic_x": int(getattr(geometry_spec, "periodic_x", False)),
             "boundary_depth_index": spec.boundary_depth,
             "smoothing_depth": spec.smoothing_depth,
             "cut_mode": spec.mode,
@@ -1132,6 +1111,7 @@ def cut_grid(
         geometry=metrics.fields,
         refinement=refinement.fields,
         metadata=metadata,
+        geometry_spec=geometry_spec,
     )
 
 
@@ -2511,10 +2491,16 @@ def _metadata(
     spec: Any,
     options: IconGridOptions,
     geometry: dict[str, np.ndarray] | None = None,
+    *,
+    parent_uuid: str | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
-        "uuidOfHGrid": _spec_uuid(spec, options),
-        "uuidOfParHGrid": "00000000-0000-0000-0000-000000000000",
+        "uuidOfHGrid": _spec_uuid(spec, options, parent_uuid=parent_uuid),
+        "uuidOfParHGrid": (
+            parent_uuid
+            if parent_uuid is not None
+            else "00000000-0000-0000-0000-000000000000"
+        ),
         "grid_root": getattr(spec, "root", 0),
         "grid_level": getattr(spec, "bisections", 0),
         "sphere_radius": options.sphere_radius,
@@ -2573,6 +2559,7 @@ def _metadata(
             {
                 "grid_geometry": 2,
                 "periodic": int(getattr(spec, "periodic", False)),
+                "periodic_x": int(getattr(spec, "periodic_x", False)),
                 "crs_name": "Planar",
                 "grid_mapping_name": "cartesian",
                 "planar_grid_type": spec.__class__.__name__,
@@ -2601,7 +2588,6 @@ def _metadata(
         metadata.update(
             {
                 "grid_geometry": 3,
-                "grid_mapping_name": "cartesian",
                 "cut_mode": spec.mode,
                 "boundary_depth_index": spec.boundary_depth,
                 "smoothing_depth": spec.smoothing_depth,
@@ -2609,20 +2595,24 @@ def _metadata(
             }
         )
     if geometry:
-        metadata.update(
-            {
-                "mean_edge_length": float(np.mean(geometry["edge_length"])),
-                "mean_dual_edge_length": float(np.mean(geometry["dual_edge_length"])),
-                "mean_cell_area": float(np.mean(geometry["cell_area"])),
-                "mean_dual_cell_area": float(np.mean(geometry["dual_area"])),
-            }
-        )
+        metadata.update(_geometry_summary(geometry))
     return metadata
+
+
+def _geometry_summary(geometry: dict[str, np.ndarray]) -> dict[str, float]:
+    return {
+        "mean_edge_length": float(np.mean(geometry["edge_length"])),
+        "mean_dual_edge_length": float(np.mean(geometry["dual_edge_length"])),
+        "mean_cell_area": float(np.mean(geometry["cell_area"])),
+        "mean_dual_cell_area": float(np.mean(geometry["dual_area"])),
+    }
 
 
 def _spec_uuid(
     spec: Any,
     options: IconGridOptions,
+    *,
+    parent_uuid: str | None = None,
 ) -> str:
     if isinstance(spec, GlobalGridSpec):
         payload = {
@@ -2659,6 +2649,7 @@ def _spec_uuid(
             {
                 "family": "limited_area",
                 "parent_grid_name": spec.parent_grid_name,
+                "parent_uuid": parent_uuid,
                 "region": _canonicalize_payload(asdict(spec)["region"]),
                 "boundary_depth": spec.boundary_depth,
             }
@@ -2677,6 +2668,7 @@ def _spec_uuid(
         payload.update(
             {
                 "family": "cut",
+                "parent_uuid": parent_uuid,
                 "mode": spec.mode,
                 "boundary_depth": spec.boundary_depth,
                 "smoothing_depth": spec.smoothing_depth,

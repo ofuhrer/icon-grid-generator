@@ -5,8 +5,9 @@ import builtins
 import numpy as np
 import pytest
 
-from grid_generator import TorusGridSpec, generate_grid
+from grid_generator import Region, TorusGridSpec, generate_grid
 from grid_generator import _netcdf
+from grid_generator.cutting import cut_grid
 
 
 def unit_rows(points):
@@ -28,6 +29,30 @@ def test_torus_netcdf_export_contains_complete_periodic_grid(tmp_path):
         assert np.array_equal(dataset.variables["adjacent_cell_of_edge"][:], grid.edge_cells.T + 1)
         assert np.allclose(dataset.variables["cell_area"][:], grid.geometry["cell_area"])
         assert np.allclose(dataset.variables["edge_length"][:], grid.geometry["edge_length"])
+        assert dataset.variables["edgequad_area"].getncattr("units") == "m2"
+
+
+def test_planar_cut_netcdf_retains_physical_edgequad_area(tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+    parent = generate_grid(TorusGridSpec(nx=6, ny=5, edge_length=2.0))
+    grid = cut_grid(
+        parent,
+        Region.lonlat_box(
+            lon_min=-120.0,
+            lon_max=0.0,
+            lat_min=-90.0,
+            lat_max=90.0,
+        ),
+    )
+
+    path = grid.to_netcdf(tmp_path / "planar-cut.nc")
+
+    with netcdf4.Dataset(path) as dataset:
+        assert np.allclose(
+            dataset.variables["edgequad_area"][:],
+            grid.geometry["edgequad_area"],
+        )
+        assert dataset.variables["edgequad_area"].getncattr("units") == "m2"
 
 
 def test_to_netcdf_writes_expected_icon_grid_content(tmp_path):
@@ -154,6 +179,10 @@ def test_to_netcdf_writes_expected_icon_grid_content(tmp_path):
             dataset.variables["edgequad_area"][:],
             grid.geometry["edgequad_area"] / grid.options.sphere_radius**2,
         )
+        assert dataset.variables["edgequad_area"].getncattr("units") == "1"
+        assert "sphere_radius squared" in dataset.variables[
+            "edgequad_area"
+        ].getncattr("normalization")
         assert np.array_equal(
             dataset.variables["orientation_of_normal"][:],
             grid.geometry["orientation_of_normal"].T,

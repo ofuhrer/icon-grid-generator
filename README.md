@@ -38,6 +38,30 @@ Global grids are optimized by default and are suitable for normal ICON-style
 grid-file use. Use `optimize_global=False` only when you explicitly need the
 raw bisection topology for diagnostics or tests.
 
+## What Optimization Means
+
+The package exposes three related but distinct operations:
+
+| Operation | Actual update | Typical use |
+| --- | --- | --- |
+| Default global optimization | Damped spherical spring relaxation after refinement stages | Regular production-style global grids |
+| `optimize_grid()` | Simultaneous Laplacian smoothing, or incident-edge target-length smoothing | Improve an existing global, planar, or cut grid |
+| `diffuse_grid()` | Explicit graph-Laplacian diffusion | Controlled experimental smoothing |
+
+All three preserve cells, edges, connectivity, and refinement relationships.
+They move eligible vertices, project them back onto the grid geometry, and
+recompute centers, metric fields, normals, statistics metadata, and grid UUIDs.
+Open-boundary vertices are fixed by default. Periodic grids use their coupled
+minimum-image lattice during every update.
+
+`optimize_grid()` and `diffuse_grid()` do not prove that every quality measure
+improves: aggressive settings can flatten or invert cells. Inspect the result
+with `check_grid()`, `triangle_properties()`, or application-specific quality
+criteria; `check_grid()` itself is a structural check, not a scientific
+certificate. See the
+[optimization guide](https://ofuhrer.github.io/icon-grid-generator/api/#grid-optimization)
+for the update equations, option semantics, and examples.
+
 ## What You Can Generate
 
 - Global spherical ICON grids from standard `R<n>B<k>` names.
@@ -47,6 +71,12 @@ raw bisection topology for diagnostics or tests.
   installed.
 - In-memory topology, geometry, metric, refinement, and metadata arrays for
   plotting, diagnostics, and downstream conversion.
+
+`IconGrid.to_xarray()` preserves those field groups and their zero-based
+in-memory connectivity. Parent-provenance arrays retain their ICON-compatible
+one-based indices; every xarray index variable carries a `start_index`
+attribute and its missing-value convention. `IconGrid.to_netcdf()` converts
+connectivity to the one-based ICON grid-file convention.
 
 ## Which Grid Should I Use?
 
@@ -59,7 +89,29 @@ raw bisection topology for diagnostics or tests.
 | Regional extract from a global parent | `LimitedAreaGridSpec(...)` |
 | Cut an existing in-memory grid | `grid_generator.cutting.cut_grid(...)` |
 
+## Important Conventions
+
+- Spherical `lon`/`lat` arrays are in degrees in memory; ICON NetCDF longitude
+  and latitude variables are written in radians.
+- `radius` sets the Cartesian display sphere (default `1.0`), while
+  `sphere_radius` sets physical spherical lengths and areas. Changing `radius`
+  does not rescale physical metrics.
+- Planar `vertices` and metrics use the length unit supplied by the spec. Use
+  metres if metre-labelled xarray and NetCDF output is required. Planar
+  `lon`/`lat` arrays are normalized plotting coordinates, not geographic
+  coordinates.
+- In-memory topology is zero-based and uses `-1` for a missing open-boundary
+  neighbor. ICON NetCDF connectivity is one-based and uses `0` where required.
+- Treat a completed `IconGrid` and its NumPy arrays as immutable. `to_dict()`
+  exposes the existing arrays rather than defensive copies.
+
+The [API guide](https://ofuhrer.github.io/icon-grid-generator/api/) describes
+coordinate units, option precedence, regional selection, output indexing, and
+diagnostic limitations in detail.
+
 ## Installation
+
+Python 3.10 or newer is required. The base installation depends only on NumPy.
 
 Install from PyPI:
 
@@ -90,6 +142,13 @@ Install development dependencies with:
 ```bash
 python -m pip install -e ".[test,docs]"
 ```
+
+| Extra | Adds |
+| --- | --- |
+| `netcdf` | ICON-style NetCDF writing through `netCDF4` |
+| `xarray` | `IconGrid.to_xarray()` |
+| `accelerate` | Optional Numba acceleration for larger generation work |
+| `test`, `docs` | Contributor test and documentation tools |
 
 ## Grid Naming
 
@@ -183,7 +242,7 @@ NetCDF export requires the `netcdf` optional extra. See
 
 ## Documentation
 
-The minimal documentation lives in [docs](docs):
+The full usage and design documentation lives in [docs](docs):
 
 - [Overview](docs/index.md)
 - [Examples](docs/examples.md)

@@ -9,7 +9,10 @@ import numpy as np
 
 from ._geometry import SphericalIcosahedralGeometry
 from ._metrics import SphericalMetricsBuilder
-from ._optimization import _GlobalOptimizationOptions, optimize_global_grid
+from ._optimization import (
+    _GlobalOptimizationOptions,
+    _optimize_global_grid_for_generation,
+)
 from ._ordering import IconOrderingBuilder
 from ._refinement import GlobalRefinementBuilder
 from ._topology import GlobalTopologyBuilder
@@ -93,7 +96,7 @@ def _generate_staged_global_grid(
     if stage_iterations == 0:
         _evict_staged_parent_cache(context, parent_spec, spec)
         return grid
-    relaxed = optimize_global_grid(
+    relaxed = _optimize_global_grid_for_generation(
         grid,
         _GlobalOptimizationOptions(method="spring", iterations=stage_iterations),
     )

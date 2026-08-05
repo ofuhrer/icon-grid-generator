@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-05
+
+- Correct skew-periodic torus seam geometry so coordinates, metric fields,
+  normal vectors, divergence operators, optimization, and diffusion use the
+  same minimum-image convention.
+- Orient planar and extracted-grid normals consistently with local adjacent-cell
+  ordering, while preserving source-parent metric provenance.
+- Include parent UUIDs in limited-area and cut-grid identity payloads and export
+  the actual parent as `uuidOfParHGrid`. Existing derived-grid UUIDs therefore
+  change to remove collisions between distinct parents or parent options.
+- Include geometry, connectivity, refinement, metadata, and units in
+  `IconGrid.to_xarray()` datasets.
+- Populate planar `edgequad_area` from the primal/dual vector cross product,
+  including the actual intersection angle on sheared grids.
+- Derive stretched, sheared, periodic, and open planar dual metrics from the
+  generated coordinates, including boundary-aware dual areas that partition
+  the primal cell area.
+- Preserve source periodic geometry and parent provenance when transforming
+  cut grids. Public optimization and diffusion transforms now assign a
+  deterministic UUID derived from the input UUID and transform options.
+- Inherit cut-grid CRS metadata from the source grid instead of labeling every
+  cut as Cartesian.
+- Mark normalized spherical NetCDF `edgequad_area` values as dimensionless and
+  annotate xarray connectivity and parent-index conventions.
+- Recognize toroidal Euler characteristic in diagnostics and omit periodic seam
+  artifacts from SVG plots.
+- Document the global spring system, Laplacian/target-length smoothing,
+  diffusion update, boundary and projection rules, stability limitations, and
+  UUID behavior. Direct `optimize_global_grid()` calls now record transform
+  provenance consistently with the other public transforms.
+- Document installation extras, option precedence, grid-family constraints,
+  coordinate and index conventions, regional selection semantics, object
+  mutability, export behavior, and the scientific scope of diagnostics.
+- Refresh citation metadata for release 0.4.0.
+
 ## 0.3.2 - 2026-07-07
 
 - Restore documentation grid figures to the stable 2D SVG edge-plot style.

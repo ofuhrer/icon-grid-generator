@@ -421,12 +421,27 @@ def test_to_xarray_contains_coordinates_data_variables_and_attrs():
     grid = generate_grid("R01B00", options={"radius": 7.0})
     dataset = grid.to_xarray()
 
-    assert dataset.sizes == {"vertex": 12, "xyz": 3, "cell": 20, "cell_vertex": 3, "edge": 30, "edge_vertex": 2, "edge_cell": 2}
+    assert {
+        "vertex": 12,
+        "xyz": 3,
+        "cell": 20,
+        "cell_vertex": 3,
+        "edge": 30,
+        "edge_vertex": 2,
+        "edge_cell": 2,
+        "vertex_neighbor": 6,
+        "max_chdom": 1,
+        "cell_grf": 14,
+        "edge_grf": 24,
+        "vert_grf": 13,
+    }.items() <= dataset.sizes.items()
     assert dataset.attrs["name"] == "R01B00"
     assert dataset.attrs["root"] == 1
     assert dataset.attrs["bisections"] == 0
     assert dataset.attrs["frequency"] == 1
     assert dataset.attrs["radius"] == 7.0
+    assert dataset.attrs["sphere_radius"] == grid.options.sphere_radius
+    assert dataset.attrs["uuidOfHGrid"] == grid.metadata["uuidOfHGrid"]
     assert np.array_equal(dataset["xyz"].values, np.array(["x", "y", "z"]))
     assert np.array_equal(dataset["cell_vertex"].values, np.array([0, 1, 2], dtype=np.int32))
     assert np.array_equal(dataset["edge_vertex"].values, np.array([0, 1], dtype=np.int32))
@@ -437,6 +452,30 @@ def test_to_xarray_contains_coordinates_data_variables_and_attrs():
     assert np.array_equal(dataset["edge_center_xyz"].values, grid.edge_center_xyz)
     assert np.array_equal(dataset["edge_lon"].values, grid.edge_lon)
     assert np.array_equal(dataset["edge_lat"].values, grid.edge_lat)
+    for name in (
+        "cell_area",
+        "edge_length",
+        "edge_primal_normal_cartesian",
+        "neighbor_cell_index",
+        "parent_cell_index",
+    ):
+        assert name in dataset
+    assert dataset["cell_area"].attrs["units"] == "m2"
+    assert dataset["edge_length"].attrs["units"] == "m"
+    assert dataset["lon"].attrs["units"] == "degrees_east"
+    assert dataset["cells"].attrs["start_index"] == 0
+    assert dataset["edge_cells"].attrs == {
+        "start_index": 0,
+        "missing_value": -1,
+    }
+    assert dataset["neighbor_cell_index"].attrs == {
+        "start_index": 0,
+        "missing_value": -1,
+    }
+    assert dataset["parent_cell_index"].attrs == {
+        "start_index": 1,
+        "missing_value": 0,
+    }
 
 
 def test_safety_cap_fails_clearly_and_can_be_changed_or_disabled():

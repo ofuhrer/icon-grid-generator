@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
+import json
 from typing import Any
+import uuid
 
 import numpy as np
 
@@ -47,7 +49,14 @@ class _GlobalGridOptions:
 
 @dataclass(frozen=True)
 class OptimizationOptions:
-    """Options for deterministic Laplacian/spring grid smoothing."""
+    """Options for deterministic Laplacian or target-length smoothing.
+
+    ``relaxation`` is the fraction of the displacement toward the simultaneous
+    neighbor-derived target applied per iteration. Open-boundary vertices stay
+    fixed when ``fixed_boundary`` is true. ``target_edge_length=None`` selects
+    neighbor-centroid Laplacian smoothing; a positive value selects the mean of
+    target-length points along incident edges.
+    """
 
     iterations: int = 10
     relaxation: float = 0.25
@@ -86,7 +95,13 @@ class _GlobalOptimizationOptions:
 
 @dataclass(frozen=True)
 class DiffusionOptions:
-    """Options for explicit geometry diffusion over vertex adjacency."""
+    """Options for explicit graph-Laplacian diffusion over vertex adjacency.
+
+    The effective explicit step is ``diffusion_constant * dt *
+    neighbor_weight``. Values above one extrapolate beyond the neighbor mean
+    and can degrade or invert cells. Open-boundary vertices stay fixed when
+    ``fixed_boundary`` is true.
+    """
 
     iterations: int = 10
     diffusion_constant: float = 0.1
@@ -129,21 +144,65 @@ def resolve_global_optimization_options(value: Any) -> _GlobalOptimizationOption
 
 
 def optimize_global_grid(grid: Any, options: Any = None) -> Any:
-    """Return a spring-relaxed global spherical grid with unchanged topology."""
+    """Return a spring-relaxed global spherical grid with unchanged topology.
+
+    ``options`` accepts ``None``, a ``"spring"``/``"none"`` method string, or
+    a mapping with ``method`` and a non-negative ``iterations`` cap. A
+    nontrivial direct transform receives a deterministic new UUID derived from
+    the source UUID and normalized options.
+    """
     opts = _GlobalOptimizationOptions(method="spring") if options is None else resolve_global_optimization_options(options)
     if opts.method == "none" or opts.iterations == 0:
         return grid
     if grid.metadata.get("grid_geometry") != 1:
         raise ValueError("global optimization requires a spherical global grid")
-    vertices = _spring_relaxed_vertices(grid, opts)
-    return _rebuild_grid(grid, vertices)
+    return _run_global_optimization(grid, opts, record_transform=True)
+
+
+def _optimize_global_grid_for_generation(
+    grid: Any,
+    options: _GlobalOptimizationOptions,
+) -> Any:
+    return _run_global_optimization(grid, options, record_transform=False)
+
+
+def _run_global_optimization(
+    grid: Any,
+    options: _GlobalOptimizationOptions,
+    *,
+    record_transform: bool,
+) -> Any:
+    vertices = _spring_relaxed_vertices(grid, options)
+    if not record_transform:
+        return _rebuild_grid(grid, vertices)
+    rebuilt = _rebuild_grid(
+        grid,
+        vertices,
+        transform=("global_spring", asdict(options)),
+    )
+    metadata = dict(rebuilt.metadata)
+    metadata.update(
+        {
+            "global_optimization": "spring",
+            "global_optimization_iterations": options.iterations,
+        }
+    )
+    return replace(rebuilt, metadata=metadata)
 
 
 def optimize_grid(grid: Any, options: OptimizationOptions | None = None) -> Any:
-    """Return a geometry-optimized copy of `grid` with unchanged topology."""
+    """Return a Laplacian- or target-length-smoothed grid copy.
+
+    Vertex updates are simultaneous, topology and refinement arrays are
+    preserved, geometry-derived fields are rebuilt, and a nontrivial transform
+    receives a deterministic new UUID. Zero iterations or zero relaxation
+    return the input object unchanged.
+    """
     opts = OptimizationOptions() if options is None else options
     if not isinstance(opts, OptimizationOptions):
         raise TypeError("options must be an OptimizationOptions instance or None")
+    if opts.iterations == 0 or opts.relaxation == 0.0:
+        return grid
     vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
     adjacency = _vertex_adjacency(grid)
     movable = _movable_vertices(grid, opts.fixed_boundary)
@@ -152,17 +211,39 @@ def optimize_grid(grid: Any, options: OptimizationOptions | None = None) -> Any:
         for vertex, neighbors in enumerate(adjacency):
             if not movable[vertex] or not neighbors:
                 continue
-            target = _spring_target(vertices, vertex, neighbors, opts.target_edge_length)
+            target = _spring_target(
+                vertices,
+                vertex,
+                neighbors,
+                opts.target_edge_length,
+                grid=grid,
+            )
             updated[vertex] = vertices[vertex] + opts.relaxation * (target - vertices[vertex])
         vertices = _project_vertices(grid, updated)
-    return _rebuild_grid(grid, vertices)
+    return _rebuild_grid(
+        grid,
+        vertices,
+        transform=("optimization", asdict(opts)),
+    )
 
 
 def diffuse_grid(grid: Any, options: DiffusionOptions | None = None) -> Any:
-    """Return a geometry-diffused copy of `grid` with unchanged topology."""
+    """Return a graph-Laplacian-diffused grid copy.
+
+    Vertex updates are simultaneous, topology and refinement arrays are
+    preserved, geometry-derived fields are rebuilt, and a nontrivial transform
+    receives a deterministic new UUID. A zero iteration count, diffusion
+    constant, or time step returns the input object unchanged.
+    """
     opts = DiffusionOptions() if options is None else options
     if not isinstance(opts, DiffusionOptions):
         raise TypeError("options must be a DiffusionOptions instance or None")
+    if (
+        opts.iterations == 0
+        or opts.diffusion_constant == 0.0
+        or opts.dt == 0.0
+    ):
+        return grid
     vertices = np.asarray(grid.vertices, dtype=np.float64).copy()
     adjacency = _vertex_adjacency(grid)
     movable = _movable_vertices(grid, opts.fixed_boundary)
@@ -172,12 +253,17 @@ def diffuse_grid(grid: Any, options: DiffusionOptions | None = None) -> Any:
         for vertex, neighbors in enumerate(adjacency):
             if not movable[vertex] or not neighbors:
                 continue
-            average = vertices[neighbors].mean(axis=0)
+            directions = _neighbor_directions(grid, vertices, vertex, neighbors)
+            average = vertices[vertex] + directions.mean(axis=0)
             updated[vertex] = vertices[vertex] + step * opts.neighbor_weight * (
                 average - vertices[vertex]
             )
         vertices = _project_vertices(grid, updated)
-    return _rebuild_grid(grid, vertices)
+    return _rebuild_grid(
+        grid,
+        vertices,
+        transform=("diffusion", asdict(opts)),
+    )
 
 
 def _validate_iterations(name: str, value: Any) -> None:
@@ -308,10 +394,16 @@ def _spring_target(
     vertex: int,
     neighbors: list[int],
     target_edge_length: float | None,
+    *,
+    grid: Any | None = None,
 ) -> np.ndarray:
+    directions = (
+        vertices[neighbors] - vertices[vertex]
+        if grid is None
+        else _neighbor_directions(grid, vertices, vertex, neighbors)
+    )
     if target_edge_length is None:
-        return vertices[neighbors].mean(axis=0)
-    directions = vertices[neighbors] - vertices[vertex]
+        return vertices[vertex] + directions.mean(axis=0)
     lengths = np.linalg.norm(directions, axis=1)
     active = lengths > 0.0
     if not np.any(active):
@@ -320,13 +412,38 @@ def _spring_target(
     return desired.mean(axis=0)
 
 
+def _neighbor_directions(
+    grid: Any,
+    vertices: np.ndarray,
+    vertex: int,
+    neighbors: list[int],
+) -> np.ndarray:
+    directions = vertices[neighbors] - vertices[vertex]
+    from ._planar import _geometry_spec
+
+    geometry_spec = _geometry_spec(grid)
+    if bool(getattr(geometry_spec, "periodic", False)):
+        from ._planar import _periodic_lattice_delta
+
+        return _periodic_lattice_delta(directions, geometry_spec)
+    if bool(getattr(geometry_spec, "periodic_x", False)):
+        from ._planar import _horizontal_periodic_delta
+
+        directions[:, 0] = _horizontal_periodic_delta(directions[:, 0], geometry_spec)
+    return directions
+
+
 def _project_vertices(grid: Any, vertices: np.ndarray) -> np.ndarray:
     projected = vertices.copy()
     if _uses_planar_projection(grid):
         projected[:, 2] = grid.vertices[:, 2]
-        if grid.metadata.get("periodic"):
-            projected[:, 0] %= grid.spec.domain_length
-            projected[:, 1] %= grid.spec.domain_height
+        from ._planar import _geometry_spec
+
+        geometry_spec = _geometry_spec(grid)
+        if getattr(geometry_spec, "periodic", False):
+            from ._planar import _wrap_periodic_points
+
+            projected = _wrap_periodic_points(projected, geometry_spec)
         return projected
 
     radius = grid.options.radius
@@ -336,12 +453,24 @@ def _project_vertices(grid: Any, vertices: np.ndarray) -> np.ndarray:
     return projected / norms[:, np.newaxis] * radius
 
 
-def _rebuild_grid(grid: Any, vertices: np.ndarray) -> Any:
+def _rebuild_grid(
+    grid: Any,
+    vertices: np.ndarray,
+    *,
+    transform: tuple[str, dict[str, Any]] | None = None,
+) -> Any:
     if _uses_planar_projection(grid):
         from ._planar import rebuild_planar_grid
 
-        return rebuild_planar_grid(grid, vertices)
-    return _rebuild_spherical_grid(grid, vertices)
+        rebuilt = rebuild_planar_grid(grid, vertices)
+    else:
+        rebuilt = _rebuild_spherical_grid(grid, vertices)
+    if transform is None:
+        return rebuilt
+    return replace(
+        rebuilt,
+        metadata=_transformed_metadata(grid, rebuilt.geometry, *transform),
+    )
 
 
 def _uses_planar_projection(grid: Any) -> bool:
@@ -361,7 +490,7 @@ def _rebuild_spherical_grid(grid: Any, vertices: np.ndarray) -> Any:
     edge_lon, edge_lat = gg._lon_lat(edge_center_xyz)
     geometry = _spherical_metrics(grid, vertices, cell_center_xyz, edge_center_xyz)
     metadata = dict(grid.metadata)
-    metadata.update(gg._metadata(grid.spec, grid.options, geometry))
+    metadata.update(gg._geometry_summary(geometry))
     return gg.IconGrid(
         spec=grid.spec,
         options=grid.options,
@@ -386,7 +515,45 @@ def _rebuild_spherical_grid(grid: Any, vertices: np.ndarray) -> Any:
         geometry=geometry,
         refinement={name: value.copy() for name, value in grid.refinement.items()},
         metadata=metadata,
+        geometry_spec=grid.geometry_spec,
     )
+
+
+def _transformed_metadata(
+    grid: Any,
+    geometry: dict[str, np.ndarray],
+    operation: str,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    from . import grid_generator as gg
+
+    canonical_options = gg._canonicalize_payload(options)
+    payload = {
+        "generator": "grid_generator",
+        "source_uuid": grid.metadata["uuidOfHGrid"],
+        "operation": operation,
+        "options": canonical_options,
+    }
+    metadata = dict(grid.metadata)
+    metadata.update(gg._geometry_summary(geometry))
+    metadata.update(
+        {
+            "uuidOfHGrid": str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                )
+            ),
+            "geometry_transform": operation,
+            "geometry_transform_source_uuid": grid.metadata["uuidOfHGrid"],
+            "geometry_transform_options": json.dumps(
+                canonical_options,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+    )
+    return metadata
 
 
 def _spherical_metrics(
