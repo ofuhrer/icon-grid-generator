@@ -521,10 +521,9 @@ coordinates, omits seam-crossing segments, and deterministically subsamples
 when the edge count exceeds `max_edges` (default 20,000). Create the destination
 directory before calling it.
 
-## Public API Inventory
+## Root Package Exports
 
-Every name exported from `grid_generator.__all__` should appear here so public
-documentation moves with API changes:
+The following names are available directly from `grid_generator`:
 
 - `ChannelGridSpec`
 - `GlobalGridSpec`

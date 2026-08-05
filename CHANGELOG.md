@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.4.1 - 2026-08-05
+
+- Streamline the README to the essential project description, quick start,
+  capabilities, installation, documentation, development, citation, and license
+  sections.
+- Remove repository-configuration recommendations from the published
+  documentation and present the root import surface as a user-facing reference.
+
 ## 0.4.0 - 2026-08-05
 
 - Correct skew-periodic torus seam geometry so coordinates, metric fields,

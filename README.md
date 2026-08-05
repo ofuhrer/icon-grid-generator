@@ -16,8 +16,6 @@ ICON model runtimes or stencil frameworks.
 
 ## Quick Start
 
-Most users only need `generate_grid()`:
-
 ```python
 from grid_generator import generate_grid
 
@@ -27,260 +25,59 @@ print(grid.dims)
 grid.to_netcdf("icon_grid_R02B04.nc")
 ```
 
-Example output:
-
 ```text
 R02B04
 {'cell': 20480, 'vertex': 10242, 'edge': 30720}
 ```
 
-Global grids are optimized by default and are suitable for normal ICON-style
-grid-file use. Use `optimize_global=False` only when you explicitly need the
-raw bisection topology for diagnostics or tests.
-
-## What Optimization Means
-
-The package exposes three related but distinct operations:
-
-| Operation | Actual update | Typical use |
-| --- | --- | --- |
-| Default global optimization | Damped spherical spring relaxation after refinement stages | Regular production-style global grids |
-| `optimize_grid()` | Simultaneous Laplacian smoothing, or incident-edge target-length smoothing | Improve an existing global, planar, or cut grid |
-| `diffuse_grid()` | Explicit graph-Laplacian diffusion | Controlled experimental smoothing |
-
-All three preserve cells, edges, connectivity, and refinement relationships.
-They move eligible vertices, project them back onto the grid geometry, and
-recompute centers, metric fields, normals, statistics metadata, and grid UUIDs.
-Open-boundary vertices are fixed by default. Periodic grids use their coupled
-minimum-image lattice during every update.
-
-`optimize_grid()` and `diffuse_grid()` do not prove that every quality measure
-improves: aggressive settings can flatten or invert cells. Inspect the result
-with `check_grid()`, `triangle_properties()`, or application-specific quality
-criteria; `check_grid()` itself is a structural check, not a scientific
-certificate. See the
-[optimization guide](https://ofuhrer.github.io/icon-grid-generator/api/#grid-optimization)
-for the update equations, option semantics, and examples.
+Global grids are optimized by default. Pass `optimize_global=False` only when
+raw bisection geometry is required for diagnostics or comparisons.
 
 ## What You Can Generate
 
 - Global spherical ICON grids from standard `R<n>B<k>` names.
-- Planar triangular torus, channel, and parallelogram grids for experiments.
-- Limited-area grids extracted from generated global parent grids.
-- ICON-style NetCDF grid files when the optional `netCDF4` dependency is
-  installed.
-- In-memory topology, geometry, metric, refinement, and metadata arrays for
-  plotting, diagnostics, and downstream conversion.
-
-`IconGrid.to_xarray()` preserves those field groups and their zero-based
-in-memory connectivity. Parent-provenance arrays retain their ICON-compatible
-one-based indices; every xarray index variable carries a `start_index`
-attribute and its missing-value convention. `IconGrid.to_netcdf()` converts
-connectivity to the one-based ICON grid-file convention.
-
-## Which Grid Should I Use?
-
-| Goal | Use |
-| --- | --- |
-| Standard spherical grid file | `generate_grid("R2B4")` |
-| Raw topology checks | `generate_grid("R2B4", optimize_global=False)` |
-| Periodic planar experiment | `TorusGridSpec(...)` |
-| Open planar experiment | `ChannelGridSpec(...)` or `ParallelogramGridSpec(...)` |
-| Regional extract from a global parent | `LimitedAreaGridSpec(...)` |
-| Cut an existing in-memory grid | `grid_generator.cutting.cut_grid(...)` |
-
-## Important Conventions
-
-- Spherical `lon`/`lat` arrays are in degrees in memory; ICON NetCDF longitude
-  and latitude variables are written in radians.
-- `radius` sets the Cartesian display sphere (default `1.0`), while
-  `sphere_radius` sets physical spherical lengths and areas. Changing `radius`
-  does not rescale physical metrics.
-- Planar `vertices` and metrics use the length unit supplied by the spec. Use
-  metres if metre-labelled xarray and NetCDF output is required. Planar
-  `lon`/`lat` arrays are normalized plotting coordinates, not geographic
-  coordinates.
-- In-memory topology is zero-based and uses `-1` for a missing open-boundary
-  neighbor. ICON NetCDF connectivity is one-based and uses `0` where required.
-- Treat a completed `IconGrid` and its NumPy arrays as immutable. `to_dict()`
-  exposes the existing arrays rather than defensive copies.
-
-The [API guide](https://ofuhrer.github.io/icon-grid-generator/api/) describes
-coordinate units, option precedence, regional selection, output indexing, and
-diagnostic limitations in detail.
+- Planar triangular torus, channel, parallelogram, stretched, and ragged grids.
+- Limited-area grids extracted from generated global parents.
+- Region-based cuts of existing spherical or planar grids.
+- ICON-style NetCDF files and complete in-memory xarray datasets.
+- Geometry, topology, metric, refinement, diagnostic, and visualization data.
 
 ## Installation
 
-Python 3.10 or newer is required. The base installation depends only on NumPy.
-
-Install from PyPI:
-
-```bash
-python -m pip install "icon-grid-generator[netcdf]"
-```
-
-From a local checkout:
+Python 3.10 or newer is required. Install the common NetCDF and xarray support
+from PyPI with:
 
 ```bash
-python -m pip install -e .
+python -m pip install "icon-grid-generator[netcdf,xarray]"
 ```
 
-Install optional NetCDF and xarray support with:
-
-```bash
-python -m pip install -e ".[netcdf,xarray]"
-```
-
-Install optional Numba acceleration support with:
-
-```bash
-python -m pip install -e ".[accelerate]"
-```
-
-Install development dependencies with:
-
-```bash
-python -m pip install -e ".[test,docs]"
-```
-
-| Extra | Adds |
-| --- | --- |
-| `netcdf` | ICON-style NetCDF writing through `netCDF4` |
-| `xarray` | `IconGrid.to_xarray()` |
-| `accelerate` | Optional Numba acceleration for larger generation work |
-| `test`, `docs` | Contributor test and documentation tools |
-
-## Grid Naming
-
-The ICON documentation describes grid file names with the generic nomenclature
-[`R<n>B<k>`](https://docs.icon-model.org/documentation/buildrun/buildrun_input_data.html),
-where `n` is the number of root divisions and `k` is the number of subsequent
-bisections.
-
-## Resource Expectations
-
-Global grid size grows by a factor of four with each bisection:
-
-| Grid | Cells | Edges | Vertices |
-| --- | ---: | ---: | ---: |
-| `R1B0` | 20 | 30 | 12 |
-| `R1B1` | 80 | 120 | 42 |
-| `R2B3` | 5,120 | 7,680 | 2,562 |
-| `R2B4` | 20,480 | 30,720 | 10,242 |
-| `R2B6` | 327,680 | 491,520 | 163,842 |
-
-`generate_grid()` has a default safety limit of 2,000,000 cells. Set
-`max_cells=None` only when the allocation is intentional.
-
-## Common Recipes
-
-Disable the default safety limit when a large allocation is intentional:
-
-```python
-from grid_generator import generate_grid
-
-grid = generate_grid("R2B4", max_cells=None)
-```
-
-Generate a raw diagnostic grid without global optimization:
-
-```python
-raw_grid = generate_grid("R2B4", optimize_global=False)
-```
-
-Generate a planar torus grid:
-
-```python
-from grid_generator import TorusGridSpec, generate_grid
-
-grid = generate_grid(TorusGridSpec(nx=32, ny=16, edge_length=1_000.0))
-print(grid.metadata["grid_geometry"])
-print(grid.metadata["domain_length"])
-```
-
-Extract a limited-area grid from a generated global parent:
-
-```python
-from grid_generator import LimitedAreaGridSpec, Region, generate_grid
-
-spec = LimitedAreaGridSpec(
-    parent="R02B03",
-    region=Region.lonlat_box(lon_min=-20.0, lon_max=20.0, lat_min=35.0, lat_max=60.0),
-    boundary_depth=2,
-)
-grid = generate_grid(spec, max_cells=None)
-print(grid.dims)
-```
-
-Cut an existing grid with advanced region predicates:
-
-```python
-from grid_generator import Region, generate_grid
-from grid_generator.cutting import CutGridSpec, cut_grid
-
-parent = generate_grid("R2B4")
-cut = cut_grid(
-    parent,
-    CutGridSpec(regions=Region.circle(lon=8.0, lat=47.0, radius_degrees=10.0)),
-)
-```
-
-For the common single-region case, pass the region directly:
-
-```python
-from grid_generator import Region, generate_grid
-from grid_generator.cutting import cut_grid
-
-parent = generate_grid("R2B4")
-cut = cut_grid(parent, Region.circle(lon=8.0, lat=47.0, radius_degrees=10.0))
-```
-
-NetCDF export requires the `netcdf` optional extra. See
-[`examples/write_global_grid.py`](examples/write_global_grid.py),
-[`examples/write_limited_area.py`](examples/write_limited_area.py), and
-[`examples/planar_torus.py`](examples/planar_torus.py) for runnable scripts.
+The base package depends only on NumPy and can instead be installed with
+`python -m pip install icon-grid-generator`.
 
 ## Documentation
 
-The full usage and design documentation lives in [docs](docs):
+The complete documentation is published at
+[ofuhrer.github.io/icon-grid-generator](https://ofuhrer.github.io/icon-grid-generator/):
 
-- [Overview](docs/index.md)
-- [Examples](docs/examples.md)
-- [API overview](docs/api.md)
-- [Design notes](docs/design.md)
-- [Repository metadata](docs/repository-metadata.md)
-
-To preview the docs locally:
-
-```bash
-mkdocs serve
-```
+- [Examples](https://ofuhrer.github.io/icon-grid-generator/examples/)
+- [API and usage guide](https://ofuhrer.github.io/icon-grid-generator/api/)
+- [Design notes and limitations](https://ofuhrer.github.io/icon-grid-generator/design/)
+- [Changelog](CHANGELOG.md)
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines, review
-expectations, and domain-specific requirements for grid math and NetCDF changes.
-
-Run the checks used by CI:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and contribution guidance.
+Run the complete local check with:
 
 ```bash
+python -m pip install -e ".[test,docs,netcdf,xarray]"
 make check
 ```
-
-The package is laid out as a standalone Python project. If this directory is
-split out of a larger checkout, keep `.github/`, `docs/`, `CITATION.cff`,
-`CHANGELOG.md`, `LICENSE`, `README.md`, `mkdocs.yml`, `pyproject.toml`, `src/`,
-and `tests/` at the new repository root.
 
 ## Citation
 
 If you use ICON Grid Generator in published work, cite it using
-[CITATION.cff](CITATION.cff). For research releases, connect the public GitHub
-repository to Zenodo before creating a GitHub Release so a DOI can be minted.
-
-## Release History
-
-See [CHANGELOG.md](CHANGELOG.md).
+[CITATION.cff](CITATION.cff).
 
 ## License
 

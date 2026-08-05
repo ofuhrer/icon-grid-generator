@@ -5,8 +5,8 @@ to copy, paste, and run. Each grid-producing example writes an SVG edge plot
 with `grid_generator.visualization.write_svg`, and the checked-in figures below
 are generated from the same code path.
 
-Regenerate the figures with `make docs-figures`. `make check`, `make package`,
-and the release workflow verify that the checked-in figures are current.
+Contributors can regenerate the figures with `make docs-figures`; `make check`
+verifies that the checked-in versions are current.
 
 ## Output Directory
 
